@@ -980,15 +980,3 @@ def _is_ip(s: str) -> bool:
     except Exception:
         return False
 
-
-def main():
-    """Launch the WLAN Scan GUI application."""
-    app = QApplication(sys.argv)
-    app.setApplicationName("WLAN Scan")
-    app.setOrganizationName("WLANScan")
-
-    window = MainWindow()
-    window.show()
-
-    sys.exit(app.exec())
-

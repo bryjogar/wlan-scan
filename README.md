@@ -111,7 +111,6 @@ Windows on ARM has a known ctypes/libffi issue with wlanapi.dll. A PowerShell-ba
 ```
 wlan-scan/
 ├── main.py                    # Entry point (GUI or CLI)
-├── run.py                     # Development launcher
 ├── build_exe.py               # PyInstaller packaging script (Windows folder)
 ├── build_portable.py          # PyInstaller packaging script (Windows onefile)
 ├── build_mac.py               # PyInstaller packaging script (macOS bundle)
