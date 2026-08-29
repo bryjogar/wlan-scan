@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# OUI cache (auto-generated)
+oui.db
+
+# Export files
+*.csv
+
+# Coverage
+.coverage
+htmlcov/
+.oui_cache/
