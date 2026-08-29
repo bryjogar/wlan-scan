@@ -42,7 +42,7 @@ Professional Wi-Fi network analysis and diagnostics tool. Built with Python and 
 
 ```bash
 # Clone
-git clone <repo-url>
+git clone https://github.com/bryjogar/wlan-scan.git
 cd wlan-scan
 
 # Create virtual environment (recommended)
@@ -112,12 +112,18 @@ Windows on ARM has a known ctypes/libffi issue with wlanapi.dll. A PowerShell-ba
 wlan-scan/
 ├── main.py                    # Entry point (GUI or CLI)
 ├── run.py                     # Development launcher
-├── build_exe.py               # PyInstaller packaging script
+├── build_exe.py               # PyInstaller packaging script (Windows folder)
+├── build_portable.py          # PyInstaller packaging script (Windows onefile)
+├── build_mac.py               # PyInstaller packaging script (macOS bundle)
 ├── requirements.txt
-├── wifi_explorer/
-│   ├── scanner.py             # wlanapi.dll ctypes wrapper (primary)
-│   ├── pwsh_scanner.py        # PowerShell/.NET fallback for ARM64
+├── wlan_scan/
+│   ├── scanner.py             # wlanapi.dll ctypes wrapper (Windows)
+│   ├── pwsh_scanner.py        # PowerShell/.NET fallback for Windows ARM64
 │   ├── netsh_scanner.py       # netsh-based fallback (legacy)
+│   ├── macos_scanner.py       # macOS scanner dispatcher
+│   ├── airport_scanner.py     # macOS airport CLI scanner
+│   ├── corewlan_scanner.py    # macOS CoreWLAN framework scanner
+│   ├── connection.py          # Active Wi-Fi connection info
 │   ├── ie_parser.py           # 802.11 Information Element parser
 │   ├── vendor_lookup.py       # MAC OUI vendor identification
 │   ├── oui_lookup.py          # OUI database downloader
@@ -137,11 +143,10 @@ wlan-scan/
 │       ├── neighbor_dialog.py # ARP scanner and client isolation check
 │       ├── speedtest_dialog.py# Ookla speedtest with result cards
 │       └── styles.py          # Dark theme constants, signal colors
-└── tests/                     # Test scripts
-    ├── test_bss_bridge.py
-    ├── test_cfunctype.py
-    ├── test_dotnet_pinvoke.py
-    └── test_wmi_bss.py
+└── tests/                     # Test suite
+    ├── test_airport_scanner.py
+    ├── test_connection.py
+    └── test_corewlan_mapping.py
 ```
 
 ### Data Flow
@@ -159,9 +164,11 @@ WlanScan() → WlanGetNetworkBssList()
 
 ## Roadmap
 
+### Completed
+- [x] **macOS support** — Native scanner via CoreWLAN and `airport` CLI, platform-appropriate subnet detection, unified cross-platform backend interface
+
 ### Next
-- [ ] **macOS support** — Native scanner via CoreWLAN or `airport` CLI, platform-appropriate subnet detection, unified cross-platform backend interface
-- [ ] **Windows installer** — `.msi` or `.exe` package via PyInstaller
+- [ ] **Windows installer** — `.msi` or `.exe` package via PyInstaller / Inno Setup
 - [ ] **Spectrum analysis integration** — Wi-Spy, MetaGeek, or other SDR hardware
 - [ ] **Signal heatmap overlay** — Floorplan import with signal interpolation
 

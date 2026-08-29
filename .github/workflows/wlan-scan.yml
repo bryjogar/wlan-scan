@@ -1,0 +1,102 @@
+name: WLAN Scan Build & Release
+
+on:
+  push:
+    tags:
+      - 'wlan-scan-v*'
+
+jobs:
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install deps
+        run: |
+          pip install -r requirements.txt pytest
+      - name: Run tests
+        run: python -m pytest tests/ -q
+
+  build-windows:
+    name: Windows build
+    needs: test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install deps
+        run: pip install -r requirements.txt pyinstaller
+      - name: Build portable bundle
+        run: python build_exe.py
+      - name: Zip portable bundle
+        run: powershell -Command "Compress-Archive -Path 'dist/WLAN Scan' -DestinationPath dist/WLAN-Scan-windows.zip -Force"
+      - name: Build single-file portable exe
+        run: python build_portable.py
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: wlan-scan-windows
+          path: |
+            dist/WLAN-Scan-windows.zip
+            dist/WLAN-Scan-Portable.exe
+          retention-days: 14
+
+  build-macos:
+    name: macOS build
+    needs: test
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install deps
+        run: pip install -r requirements.txt pyinstaller
+      - name: Build .app bundle
+        run: python build_mac.py
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wlan-scan-macos
+          path: dist/WLAN-Scan-mac.zip
+          retention-days: 14
+
+  release:
+    name: Publish release
+    needs: [build-windows, build-macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+          merge-multiple: true
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ls -la artifacts/
+          # Retry: GitHub's release API occasionally 503s; a retry usually clears it
+          for attempt in 1 2 3; do
+            if gh release create "${{ github.ref_name }}" \
+              artifacts/WLAN-Scan-windows.zip \
+              artifacts/WLAN-Scan-Portable.exe \
+              artifacts/WLAN-Scan-mac.zip \
+              --title "WLAN Scan ${{ github.ref_name }}" \
+              --notes "Automated build from ${{ github.sha }}. Windows portable bundle + single-file portable exe + macOS app." \
+              --generate-notes; then
+              echo "Release created (attempt $attempt)"
+              exit 0
+            fi
+            echo "gh release create failed (attempt $attempt) — retrying in 10s"
+            sleep 10
+          done
+          echo "ERROR: gh release create failed after 3 attempts" >&2
+          exit 1

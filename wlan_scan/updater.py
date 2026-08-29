@@ -23,10 +23,7 @@ def check_for_updates(current_sha: str) -> UpdateInfo | None:
     if not current_sha or current_sha == "unknown":
         return None
 
-    url = (
-        "https://api.github.com/repos/bryjogar/"
-        "self-hosted-and-hyper-personal/commits/main"
-    )
+    url = "https://api.github.com/repos/bryjogar/wlan-scan/commits/main"
     try:
         ctx = ssl.create_default_context()
         req = urllib.request.Request(
@@ -47,7 +44,7 @@ def check_for_updates(current_sha: str) -> UpdateInfo | None:
             latest_sha=latest[:7],
             current_sha=current_sha[:7],
             message=data["commit"]["message"].split("\n")[0][:80],
-            url="https://github.com/bryjogar/self-hosted-and-hyper-personal/releases/latest",
+            url="https://github.com/bryjogar/wlan-scan/releases/latest",
         )
     except Exception:
         return None

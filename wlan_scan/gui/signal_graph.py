@@ -202,3 +202,7 @@ class SignalGraphWidget(QWidget):
             self._axis_x.setRange(0, 120)
         else:
             self._axis_x.setRange(0, max(30, self._sample_count + 5))
+
+
+SignalGraph = SignalGraphWidget
+
