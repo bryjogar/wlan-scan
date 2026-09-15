@@ -44,7 +44,7 @@ jobs:
           path: |
             dist/WLAN-Scan-windows.zip
             dist/WLAN-Scan-Portable.exe
-          retention-days: 14
+          retention-days: 1
 
   build-macos:
     name: macOS build
@@ -64,7 +64,7 @@ jobs:
         with:
           name: wlan-scan-macos
           path: dist/WLAN-Scan-mac.zip
-          retention-days: 14
+          retention-days: 1
 
   release:
     name: Publish release
