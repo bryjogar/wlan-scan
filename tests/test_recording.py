@@ -22,7 +22,7 @@ def test_dict_round_trip():
     r = _result()
     back = scan_from_dict(json.loads(json.dumps(scan_to_dict(r))))
     b = back.networks[0].bss_list[0]
-    assert b.bssid == "aa:bb:cc:dd:ee:ff"
+    assert b.bssid == "AA:BB:CC:DD:EE:FF"  # normalised to upper case
     assert b.ies_raw == b"\x00\x01X"
     assert b.rssi == -55
     assert back.interface_name == "wlan0"

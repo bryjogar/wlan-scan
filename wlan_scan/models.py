@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Optional
+from typing import Iterable, Optional
 
 
 @dataclass
@@ -33,6 +33,12 @@ class BSSEntry:
     ies_raw: bytes = field(default_factory=bytes, repr=False)
     timestamp: datetime = field(default_factory=datetime.now)
 
+    def __post_init__(self):
+        # One canonical form everywhere (scanners disagreed on case, so the
+        # connected-BSSID marker never matched on the ctypes path).
+        if isinstance(self.bssid, str):
+            self.bssid = self.bssid.upper()
+
 
 @dataclass
 class Network:
@@ -61,3 +67,16 @@ class ScanResult:
     networks: list[Network] = field(default_factory=list)
     interface_name: str = ""
     interface_guid: str = ""
+
+
+def group_networks(entries: Iterable[BSSEntry]) -> list[Network]:
+    """Group BSS entries by SSID: strongest network first, hidden last."""
+    by_ssid: dict[str, Network] = {}
+    for b in entries:
+        net = by_ssid.get(b.ssid)
+        if net is None:
+            net = by_ssid[b.ssid] = Network(ssid=b.ssid)
+        net.bss_list.append(b)
+    for n in by_ssid.values():
+        n.refresh_summary()
+    return sorted(by_ssid.values(), key=lambda n: (not n.ssid, -n.best_rssi))

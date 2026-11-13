@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import IO, Iterable, Optional
 
 from .backends import BaseBackend, DebugFn
-from .models import BSSEntry, Network, ScanResult
+from .models import BSSEntry, ScanResult, group_networks
 
 FORMAT_VERSION = 1
 
@@ -70,19 +70,6 @@ def scan_to_dict(result: ScanResult) -> dict:
         "interface": result.interface_name,
         "bss": [bss_to_dict(b) for n in result.networks for b in n.bss_list],
     }
-
-
-def group_networks(entries: Iterable[BSSEntry]) -> list[Network]:
-    """Group BSS entries by SSID, strongest network first, hidden last."""
-    by_ssid: dict[str, Network] = {}
-    for b in entries:
-        net = by_ssid.get(b.ssid)
-        if net is None:
-            net = by_ssid[b.ssid] = Network(ssid=b.ssid)
-        net.bss_list.append(b)
-    for n in by_ssid.values():
-        n.refresh_summary()
-    return sorted(by_ssid.values(), key=lambda n: (not n.ssid, -n.best_rssi))
 
 
 def scan_from_dict(d: dict) -> ScanResult:

@@ -10,10 +10,10 @@ Returns the same ScanResult model as scanner.py for drop-in replacement.
 import subprocess
 import json
 import sys
-import struct as _struct
 from typing import Optional
 
-from .models import BSSEntry, Network, ScanResult
+from .bss import build_bss_entry
+from .models import BSSEntry, ScanResult, group_networks
 from .oui_lookup import lookup_vendor
 
 
@@ -77,7 +77,8 @@ public struct WLAN_BSS_ENTRY {
     public uint dot11BssPhyType;
     public int lRssi;
     public uint uLinkQuality;
-    public bool bInRegDomain;
+    [MarshalAs(UnmanagedType.U1)]
+    public bool bInRegDomain;   // BOOLEAN: 1 byte (default bool marshal is 4)
     public ushort usBeaconPeriod;
     public ulong ullTimestamp;
     public ulong ullHostTimestamp;
@@ -206,22 +207,12 @@ for ($i = 0; $i -lt $count; $i++) {
     $entryPtr = [IntPtr]::Add($bssList, [int]$firstEntryOffset + ($i * $entrySize))
     $bss = [Runtime.InteropServices.Marshal]::PtrToStructure($entryPtr, [Type][WLAN_BSS_ENTRY])
 
-    # Extract SSID
-    $ssidBytes = @()
-    for ($j = 0; $j -lt [int]$bss.dot11Ssid.uSSIDLength; $j++) {
-        $ssidBytes += $bss.dot11Ssid.ucSSID[$j]
+    # SSID as raw hex; Python decodes it (same as the ctypes path)
+    $ssidLen = [Math]::Min([int]$bss.dot11Ssid.uSSIDLength, 32)
+    $ssidHex = ""
+    if ($ssidLen -gt 0) {
+        $ssidHex = [BitConverter]::ToString($bss.dot11Ssid.ucSSID, 0, $ssidLen) -replace '-',''
     }
-    $ssid = ""
-    if ($ssidBytes.Count -gt 0) {
-        $ssid = [System.Text.Encoding]::UTF8.GetString($ssidBytes)
-        # Filter non-printable characters (hidden SSIDs)
-        $cleaned = ""
-        foreach ($c in $ssid.ToCharArray()) {
-            if ([int]$c -ge 32 -and [int]$c -le 126) { $cleaned += $c }
-        }
-        $ssid = $cleaned
-    }
-    if ($ssid -eq "") { $ssid = "HIDDEN" }
 
     # Format BSSID
     $bssid = "{0:X2}:{1:X2}:{2:X2}:{3:X2}:{4:X2}:{5:X2}" -f `
@@ -241,9 +232,11 @@ for ($i = 0; $i -lt $count; $i++) {
 
     # Get max rate
     $maxRate = 0
-    for ($j = 0; $j -lt [int]$bss.wlanRateSet.uRateSetLength; $j++) {
+    # uRateSetLength is in bytes; each rate is a USHORT
+    for ($j = 0; $j -lt [Math]::Min([int]($bss.wlanRateSet.uRateSetLength / 2), 126); $j++) {
         $rval = $bss.wlanRateSet.usRateSet[$j]
-        if ($rval -gt 0 -and $rval -lt 0x7FFF) {
+        $rval = $rval -band 0x7FFF   # bit 15 = basic rate flag
+        if ($rval -gt 0) {
             # Rate is in units of 0.5 Mbps
             $rate = [double]$rval * 0.5
             if ($rate -gt $maxRate) { $maxRate = $rate }
@@ -251,7 +244,7 @@ for ($i = 0; $i -lt $count; $i++) {
     }
 
     $entries += @{
-        ssid = $ssid
+        ssidHex = $ssidHex
         bssid = $bssid
         rssi = $bss.lRssi
         channelFrequency = $bss.ulChCenterFrequency
@@ -279,316 +272,44 @@ Write-Output $result
 """
 
 
-# ── PHY type mapping ──
-_PHY_TYPE_MAP: dict[int, str] = {
-    0: "unknown",
-    1: "FHSS",
-    2: "DSSS",
-    3: "IR",
-    4: "802.11a (OFDM)",
-    5: "802.11b (HRDSSS)",
-    6: "802.11g (ERP)",
-    7: "802.11n (HT)",
-    8: "802.11ac (VHT)",
-    9: "802.11ad (DMG)",
-    10: "802.11ax (HE)",
-    11: "802.11be (EHT)",
-}
-
-_PHY_SHORT: dict[int, str] = {
-    7: "802.11n",
-    8: "802.11ac",
-    9: "802.11ad",
-    10: "802.11ax",
-    11: "802.11be",
-}
-
-
-def _freq_to_band(freq_khz: int) -> str:
-    """Convert center frequency in KHz to band label."""
-    freq_mhz = freq_khz / 1000.0
-    if freq_mhz < 2500:
-        return "2.4 GHz"
-    elif freq_mhz < 6000:
-        return "5 GHz"
-    else:
-        return "6 GHz"
-
-
-def _freq_to_channel(freq_khz: int, band: str) -> int:
-    """Approximate channel number from center frequency."""
-    freq_mhz = freq_khz / 1000.0
-    if "2.4" in band:
-        if 2412 <= freq_mhz <= 2484:
-            return int((freq_mhz - 2407) / 5)
-    elif "5" in band:
-        if 5180 <= freq_mhz <= 5885:
-            return int((freq_mhz - 5000) / 5)
-    elif "6" in band:
-        if 5955 <= freq_mhz <= 7115:
-            return int((freq_mhz - 5950) / 5)
-    return 0
-
-
-def _parse_ie_hex(ie_hex: str, band: str = "") -> dict:
-    """Parse hex-encoded IEs to get channel width, security, and capabilities.
-
-    Returns: dict with keys width, phy, security, cipher, auth, generation, modes
-    """
-    width = 0
-    phy = None
-    security = None
-    cipher = None
-    auth = None
-    has_ht = False
-    has_vht = False
-    has_he = False
-    has_eht = False
-    ie_tags_found: list[str] = []  # for debugging
-
-    result = {
-        "width": 0, "phy": None, "security": None,
-        "cipher": None, "auth": None, "generation": "", "modes": "",
-        "station_count": 0, "channel_utilization": 0,
-    }
-
-    if not ie_hex:
-        return result
-
+def entry_from_json(raw: dict) -> BSSEntry:
+    """Map one bridge JSON entry to a BSSEntry via the shared builder."""
+    ssid_hex = raw.get("ssidHex")
+    if ssid_hex is not None:
+        ssid = bytes.fromhex(ssid_hex) if ssid_hex else b""
+    else:  # older bridge output
+        ssid = (raw.get("ssid") or "").encode()
+        if ssid == b"HIDDEN":
+            ssid = b""
+    ie_hex = raw.get("ieHex") or ""
     try:
-        ie_bytes = bytes.fromhex(ie_hex)
-    except (ValueError, TypeError):
-        return result
-
-    i = 0
-    while i < len(ie_bytes) - 2:
-        tag = ie_bytes[i]
-        length = ie_bytes[i + 1]
-        if i + 2 + length > len(ie_bytes):
-            break
-        data = ie_bytes[i + 2: i + 2 + length]
-
-        if tag == 11 and length >= 5:
-            # BSS Load IE — station count + channel utilization
-            sta_count = int.from_bytes(data[0:2], "little")
-            chan_util = int.from_bytes(data[2:3], "little")  # 0-255 → 0-100%
-            ie_tags_found.append(f"BSS_LOAD({sta_count},{chan_util})")
-            result["station_count"] = sta_count
-            result["channel_utilization"] = round(chan_util / 255 * 100, 1)
-
-        elif tag == 45 and length >= 24:
-            # HT Capabilities (802.11n)
-            has_ht = True
-            ie_tags_found.append("HT_CAP")
-
-        elif tag == 48 and length >= 10:
-            # RSN (WPA2/WPA3)
-            ie_tags_found.append(f"RSN")
-            rsn_cipher, rsn_auth, rsn_sec = _parse_rsn_ie(data[:length])
-            if rsn_sec:
-                security = rsn_sec
-            if rsn_cipher:
-                cipher = rsn_cipher
-            if rsn_auth:
-                auth = rsn_auth
-
-        elif tag == 61 and length >= 4:
-            # HT Operation (802.11n) — byte 0=primary ch, byte 1=HT Info 1
-            ie_tags_found.append(f"HT_OP({data[0]},{data[1]})")
-            if not phy:
-                phy = "802.11n"
-            ht_info = data[1]  # Secondary Channel Offset is in byte 1, bits 0-1
-            sta_chan_width = (data[1] >> 2) & 1  # STA Channel Width is bit 2 of byte 1
-            secondary_offset = ht_info & 3  # bits 0-1
-            if sta_chan_width and secondary_offset != 0:
-                width = 40
-            else:
-                width = 20
-
-        elif tag == 191 and length >= 4:
-            # VHT Capabilities (802.11ac)
-            has_vht = True
-            ie_tags_found.append("VHT_CAP")
-
-        elif tag == 192 and length >= 5:
-            # VHT Operation (802.11ac). VHT only operates on 5 GHz.
-            ie_tags_found.append(f"VHT_OP({data[0]:#x})")
-            if "2.4" not in band:
-                if not phy:
-                    phy = "802.11ac"
-                vht_info = data[0]
-                chan_width = vht_info & 3
-                if chan_width == 3:
-                    width = 240
-                elif chan_width == 2:
-                    width = 160
-                elif chan_width == 1:
-                    width = 80
-                else:
-                    width = 80
-            else:
-                ie_tags_found.append(f"  IGNORED(2.4GHz)")
-
-        elif tag == 255 and length >= 1:
-            # Extension IE — check extension ID
-            ext_id = data[0]
-            if ext_id == 36 and length >= 3:
-                # HE Operation (802.11ax)
-                has_he = True
-                ie_tags_found.append(f"HE_OP(len={length})")
-                if not phy:
-                    phy = "802.11ax"
-                # VHT Operation Info subfield (only meaningful on 5/6 GHz)
-                if "2.4" not in band and length >= 4:
-                    vht_op_present = data[3] & 1
-                    if vht_op_present and length >= 10:
-                        # VHT Operation Info at offset 9 (after 3-byte params + 3-byte BSS Color + 2-byte MCS)
-                        vht_op = data[9]
-                        chan_width = vht_op & 3
-                        if chan_width == 3:
-                            width = 240
-                        elif chan_width == 2:
-                            width = 160
-                        elif chan_width == 1:
-                            width = 80
-                        else:
-                            width = 80
-                        ie_tags_found.append(f"  VHT_OpInfo: cw={chan_width}, width={width}")
-            elif ext_id == 35:
-                # HE Capabilities — use to detect PHY
-                has_he = True
-                if not phy:
-                    phy = "802.11ax"
-                ie_tags_found.append(f"HE_CAP")
-            else:
-                ie_tags_found.append(f"EXT({ext_id})")
-
-        i = i + 2 + length
-
-    # Determine Wi-Fi generation and supported modes
-    is_5ghz = "5" in band or "6" in band
-    if has_he:
-        generation = "Wi-Fi 6E" if "6" in band else "Wi-Fi 6"
-        modes = "a/n/ac/ax/be" if has_eht else ("a/n/ac/ax" if is_5ghz else "b/g/n/ax")
-    elif has_vht:
-        generation = "Wi-Fi 5"
-        modes = "a/n/ac"
-    elif has_ht:
-        generation = "Wi-Fi 4"
-        modes = "a/n" if is_5ghz else "b/g/n"
-    else:
-        generation = "Legacy"
-        modes = "a" if is_5ghz else "b/g"
-
-    if ie_tags_found:
-        print(f"[ie_debug] IEs: {', '.join(ie_tags_found)}", file=sys.stderr, flush=True)
-
-    return {
-        "width": width,
-        "phy": phy or "Unknown",
-        "security": security or None,
-        "cipher": cipher or "",
-        "auth": auth or "",
-        "generation": generation,
-        "modes": modes,
-        "station_count": result["station_count"],
-        "channel_utilization": result["channel_utilization"],
-    }
+        ies = bytes.fromhex(ie_hex)
+    except ValueError:
+        ies = b""
+    return build_bss_entry(
+        ssid=ssid,
+        bssid=raw.get("bssid", ""),
+        rssi=int(raw.get("rssi", -100)),
+        freq_khz=int(raw.get("channelFrequency", 0)),
+        phy_id=int(raw.get("phyType", 0)),
+        beacon_period=int(raw.get("beaconPeriod", 0)),
+        capability=int(raw.get("capabilities", 0)),
+        ies=ies,
+        legacy_max_rate=float(raw.get("maxRate", 0.0) or 0.0),
+        vendor_lookup=lookup_vendor,
+    )
 
 
-# ── RSN IE (WPA2/WPA3) parsing ──
-
-# Cipher suite selectors (OUI 00-0f-ac, last byte)
-_CIPHER_NAMES = {
-    0x01: "WEP-40", 0x02: "TKIP", 0x04: "AES-CCMP",
-    0x05: "WEP-104", 0x06: "TKIP+AES", 0x08: "GCMP",
-    0x09: "GCMP-256", 0x0a: "CCMP-256", 0x0b: "BIP-GMAC-128",
-    0x0c: "BIP-GMAC-256", 0x0d: "BIP-CMAC-256",
-}
-
-# AKM suite selectors (OUI 00-0f-ac, last byte)
-_AKM_NAMES = {
-    0x01: "802.1X", 0x02: "PSK", 0x03: "FT-802.1X",
-    0x04: "FT-PSK", 0x05: "802.1X-SHA256", 0x06: "PSK-SHA256",
-    0x08: "SAE", 0x09: "FT-SAE", 0x0d: "OWE", 0x0e: "OWE-TM",
-    0x12: "FILS-SHA256", 0x13: "FILS-SHA384",
-    0x14: "FT-FILS-SHA256", 0x15: "FT-FILS-SHA384",
-}
-
-
-def _read_oui_type(data: bytes, offset: int) -> int | None:
-    """Read a 4-byte OUI+type suite selector, return last byte if OUI is 00-0f-ac."""
-    if offset + 4 > len(data):
-        return None
-    if data[offset:offset + 3] == b"\x00\x0f\xac":
-        return data[offset + 3]
-    return None
-
-
-def _parse_rsn_ie(data: bytes) -> tuple[str | None, str | None, str | None]:
-    """Parse RSN IE (tag 48), return (cipher, auth, security_label)."""
-    if len(data) < 8:
-        return None, None, None
-
-    # Group Cipher Suite (bytes 2-5 in RSN, offset 0 in data)
-    pos = 2 if len(data) > 2 else 0
-    group_cipher = _read_oui_type(data, pos)
-    pos += 4
-
-    cipher = _CIPHER_NAMES.get(group_cipher or 0, "") if group_cipher else ""
-
-    # Pairwise Cipher Suite Count
-    if pos + 2 > len(data):
-        return cipher or None, None, None
-    pw_count = int.from_bytes(data[pos:pos + 2], "little")
-    pos += 2
-
-    # Pairwise Cipher Suite List — take first one
-    if pw_count > 0 and pos + 4 <= len(data):
-        pw_cipher = _read_oui_type(data, pos)
-        if pw_cipher and pw_cipher != group_cipher:
-            cipher = _CIPHER_NAMES.get(pw_cipher, cipher)
-        pos += pw_count * 4
-
-    # AKM Suite Count
-    if pos + 2 > len(data):
-        return cipher or None, None, None
-    akm_count = int.from_bytes(data[pos:pos + 2], "little")
-    pos += 2
-
-    # AKM Suite List — check all for security classification
-    akm_types = []
-    for _ in range(min(akm_count, 4)):  # cap at 4
-        if pos + 4 > len(data):
-            break
-        akm_byte = _read_oui_type(data, pos)
-        if akm_byte is not None:
-            akm_types.append(akm_byte)
-        pos += 4
-
-    # Classify security from AKM suites
-    auth_str = " / ".join(_AKM_NAMES.get(a, f"0x{a:02x}") for a in akm_types)
-
-    if 0x08 in akm_types or 0x09 in akm_types:
-        if 0x02 in akm_types:
-            security = "WPA3-Transition"
-        elif 0x09 in akm_types:
-            security = "WPA3-Personal (FT)"
-        else:
-            security = "WPA3-Personal"
-    elif 0x0d in akm_types:
-        security = "OWE"
-    elif 0x01 in akm_types or 0x05 in akm_types:
-        security = "WPA2-Enterprise"
-    elif 0x02 in akm_types or 0x04 in akm_types or 0x06 in akm_types:
-        if 0x04 in akm_types:
-            security = "WPA2-Personal (FT)"
-        else:
-            security = "WPA2-Personal"
-    else:
-        security = "WPA2"  # generic, couldn't determine specific
-
-    return cipher or None, auth_str or None, security
+def result_from_json(data: dict) -> ScanResult:
+    """Map the bridge's whole JSON document to a ScanResult."""
+    raw = data.get("entries") or []
+    if isinstance(raw, dict):  # ConvertTo-Json may unroll a 1-element array
+        raw = [raw]
+    entries = [entry_from_json(e) for e in raw]
+    return ScanResult(
+        networks=group_networks(entries),
+        interface_name=data.get("interface", "") or "",
+    )
 
 
 class PwshScanner:
@@ -632,7 +353,6 @@ class PwshScanner:
         objects with real channel widths from 802.11 IEs.
         """
         self._last_error = None
-        networks: dict[str, Network] = {}
 
         try:
             proc = subprocess.run(
@@ -684,78 +404,7 @@ class PwshScanner:
             return self._empty_result()
 
         self._interface_name = data.get("interface", "")
-        entries = data.get("entries", [])
-        self._debug(f"pwsh: {len(entries)} BSS entries, {len(networks)} networks")
-
-        for raw in entries:
-            # Parse with ORIGINAL test_bss_bridge key names
-            ssid = raw.get("ssid", "")
-            bssid = raw.get("bssid", "")
-            rssi = raw.get("rssi", 0)
-            freq_khz = raw.get("channelFrequency", 0)
-            phy_num = raw.get("phyType", 0)
-            max_rate = raw.get("maxRate", 0.0)
-            ie_hex = raw.get("ieHex", "")
-            cap = raw.get("capabilities", 0)
-
-            band = _freq_to_band(freq_khz)
-            channel = _freq_to_channel(freq_khz, band)
-            phy_str = _PHY_SHORT.get(phy_num, _PHY_TYPE_MAP.get(phy_num, f"phy({phy_num})"))
-
-            # Parse IEs
-            ie_info = _parse_ie_hex(ie_hex, band)
-            channel_width = ie_info["width"] or 20
-            if ie_info["phy"] and ie_info["phy"] != "Unknown":
-                phy_str = ie_info["phy"]
-            security_str = ie_info["security"]
-            cipher_str = ie_info["cipher"]
-            auth_str = ie_info["auth"]
-            wifi_gen = ie_info["generation"]
-            wifi_modes = ie_info["modes"]
-            sta_count = ie_info.get("station_count", 0)
-            chan_util = ie_info.get("channel_utilization", 0)
-
-            self._debug(
-                f"  {bssid} ch={channel} band={band} phy={phy_str} "
-                f"width={channel_width}MHz ie_bytes={len(ie_hex)//2}")
-
-            # Security fallback from capabilities field (Privacy bit)
-            if not security_str:
-                if cap & 0x0010:
-                    security_str = "WPA/WPA2"
-                else:
-                    security_str = "Open"
-
-            bss = BSSEntry(
-                ssid=ssid,
-                bssid=bssid,
-                rssi=rssi,
-                channel=channel,
-                band=band,
-                center_frequency=int(freq_khz / 1000),
-                channel_width=channel_width,
-                phy_type=phy_str,
-                security=security_str or "Unknown",
-                cipher=cipher_str,
-                auth_algo=auth_str,
-                wifi_generation=wifi_gen,
-                supported_modes=wifi_modes,
-                max_rate=max_rate,
-                vendor=lookup_vendor(bssid),
-                station_count=sta_count,
-                channel_utilization=chan_util,
-            )
-
-            if ssid not in networks:
-                networks[ssid] = Network(ssid=ssid)
-            networks[ssid].bss_list.append(bss)
-
-        for net in networks.values():
-            net.refresh_summary()
-
-        result = ScanResult(
-            networks=list(networks.values()),
-            interface_name=self._interface_name or "",
-        )
-        self._debug(f"pwsh result: {len(result.networks)} networks, {sum(len(n.bss_list) for n in result.networks)} BSS total")
+        result = result_from_json(data)
+        self._debug(f"pwsh result: {len(result.networks)} networks, "
+                    f"{sum(len(n.bss_list) for n in result.networks)} BSS total")
         return result

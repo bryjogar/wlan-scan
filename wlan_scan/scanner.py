@@ -15,7 +15,7 @@ from datetime import datetime
 from typing import Callable, Optional
 
 from .models import BSSEntry, Network, ScanResult
-from .ie_parser import parse_information_elements
+from .bss import build_bss_entry
 from .channels import freq_to_channel as _freq_to_channel_mhz
 from .vendor_lookup import lookup_vendor
 
@@ -63,12 +63,23 @@ def _wlan_error_string(code: int) -> str:
 # ---------------------------------------------------------------------------
 
 
+# Fixed-width field types: wintypes.DWORD/ULONG are c_ulong, which is 8 bytes
+# off Windows, so these keep the layout identical (and testable) everywhere.
+_DWORD = ctypes.c_uint32
+_ULONG = ctypes.c_uint32
+_LONG = ctypes.c_int32
+_WORD = ctypes.c_uint16
+_USHORT = ctypes.c_uint16
+_BOOL = ctypes.c_int32
+_WCHAR = ctypes.c_wchar if ctypes.sizeof(ctypes.c_wchar) == 2 else ctypes.c_uint16
+
+
 class GUID(ctypes.Structure):
     _fields_ = [
-        ("Data1", wintypes.DWORD),
-        ("Data2", wintypes.WORD),
-        ("Data3", wintypes.WORD),
-        ("Data4", wintypes.BYTE * 8),
+        ("Data1", _DWORD),
+        ("Data2", _WORD),
+        ("Data3", _WORD),
+        ("Data4", ctypes.c_ubyte * 8),
     ]
 
     def __str__(self):
@@ -81,82 +92,103 @@ class GUID(ctypes.Structure):
 
 class DOT11_SSID(ctypes.Structure):
     _fields_ = [
-        ("uSSIDLength", wintypes.ULONG),
-        ("ucSSID", wintypes.BYTE * DOT11_SSID_MAX_LENGTH),
+        ("uSSIDLength", _ULONG),
+        ("ucSSID", ctypes.c_ubyte * DOT11_SSID_MAX_LENGTH),
     ]
 
 
 class WLAN_INTERFACE_INFO(ctypes.Structure):
     _fields_ = [
         ("InterfaceGuid", GUID),
-        ("strInterfaceDescription", wintypes.WCHAR * 256),
-        ("isState", wintypes.DWORD),
+        ("strInterfaceDescription", _WCHAR * 256),
+        ("isState", _DWORD),
     ]
 
 
 class WLAN_INTERFACE_INFO_LIST(ctypes.Structure):
     _fields_ = [
-        ("dwNumberOfItems", wintypes.DWORD),
-        ("dwIndex", wintypes.DWORD),
+        ("dwNumberOfItems", _DWORD),
+        ("dwIndex", _DWORD),
         ("InterfaceInfo", WLAN_INTERFACE_INFO * 1),
     ]
 
 
 class WLAN_AVAILABLE_NETWORK(ctypes.Structure):
+    """wlanapi.h WLAN_AVAILABLE_NETWORK (628 bytes)."""
     _fields_ = [
-        ("strProfileName", wintypes.WCHAR * 256),
+        ("strProfileName", _WCHAR * 256),
         ("dot11Ssid", DOT11_SSID),
-        ("dot11BssType", wintypes.DWORD),
-        ("dwNumberOfBssids", wintypes.DWORD),
-        ("bNetworkConnectable", wintypes.BOOL),
-        ("wlanNotConnectableReason", wintypes.DWORD),
-        ("dwNumberOfPhyTypes", wintypes.DWORD),
-        ("dot11PhyTypes", wintypes.DWORD * 8),
-        ("bMorePhyTypes", wintypes.BOOL),
-        ("wlanSignalQuality", wintypes.DWORD),
-        ("ulRxRate", wintypes.DWORD),
-        ("ulTxRate", wintypes.DWORD),
-        ("dwFlags", wintypes.DWORD),
-        ("dwReserved", wintypes.DWORD),
+        ("dot11BssType", _DWORD),
+        ("uNumberOfBssids", _ULONG),
+        ("bNetworkConnectable", _BOOL),
+        ("wlanNotConnectableReason", _DWORD),
+        ("uNumberOfPhyTypes", _ULONG),
+        ("dot11PhyTypes", _DWORD * WLAN_MAX_PHY_TYPE_NUMBER),
+        ("bMorePhyTypes", _BOOL),
+        ("wlanSignalQuality", _ULONG),
+        ("bSecurityEnabled", _BOOL),
+        ("dot11DefaultAuthAlgorithm", _DWORD),
+        ("dot11DefaultCipherAlgorithm", _DWORD),
+        ("dwFlags", _DWORD),
+        ("dwReserved", _DWORD),
     ]
 
 
 class WLAN_AVAILABLE_NETWORK_LIST(ctypes.Structure):
     _fields_ = [
-        ("dwNumberOfItems", wintypes.DWORD),
-        ("dwIndex", wintypes.DWORD),
+        ("dwNumberOfItems", _DWORD),
+        ("dwIndex", _DWORD),
         ("Network", WLAN_AVAILABLE_NETWORK * 1),
     ]
 
 
-DOT11_MAC_ADDRESS = wintypes.BYTE * 6
+DOT11_RATE_SET_MAX_LENGTH = 126
+
+
+class WLAN_RATE_SET(ctypes.Structure):
+    """uRateSetLength is in *bytes*; each rate is in 500 kbps units, bit 15 = basic."""
+    _fields_ = [
+        ("uRateSetLength", _ULONG),
+        ("usRateSet", _USHORT * DOT11_RATE_SET_MAX_LENGTH),
+    ]
+
+    def max_mbps(self) -> float:
+        n = min(self.uRateSetLength // 2, DOT11_RATE_SET_MAX_LENGTH)
+        rates = [(self.usRateSet[i] & 0x7FFF) * 0.5 for i in range(n)]
+        return max(rates, default=0.0)
 
 
 class WLAN_BSS_ENTRY(ctypes.Structure):
+    """wlanapi.h WLAN_BSS_ENTRY (360 bytes).
+
+    v1 declared wlanRateSet as 126 bytes and bInRegDomain as a 4-byte BOOL,
+    making the struct 232 bytes: every entry after the first was read at the
+    wrong stride. Layout is pinned by tests/test_wlanapi_layout.py.
+    """
     _fields_ = [
         ("dot11Ssid", DOT11_SSID),
-        ("uPhyId", wintypes.ULONG),
-        ("dot11Bssid", DOT11_MAC_ADDRESS),
-        ("dot11BssType", wintypes.DWORD),
-        ("dot11BssPhyType", wintypes.DWORD),
-        ("lRssi", wintypes.LONG),
-        ("uLinkQuality", wintypes.ULONG),
-        ("bInRegDomains", wintypes.BOOL),
-        ("usBeaconPeriod", wintypes.USHORT),
+        ("uPhyId", _ULONG),
+        ("dot11Bssid", ctypes.c_ubyte * 6),
+        ("dot11BssType", _DWORD),
+        ("dot11BssPhyType", _DWORD),
+        ("lRssi", _LONG),
+        ("uLinkQuality", _ULONG),
+        ("bInRegDomain", ctypes.c_ubyte),  # BOOLEAN (1 byte)
+        ("usBeaconPeriod", _USHORT),
         ("ullTimestamp", ctypes.c_ulonglong),
         ("ullHostTimestamp", ctypes.c_ulonglong),
-        ("usCapabilityInformation", wintypes.USHORT),
-        ("ulChCenterFrequency", wintypes.ULONG),
-        ("wlanRateSet", ctypes.c_ubyte * 126),
-        ("ulIeOffset", wintypes.ULONG),
-        ("ulIeSize", wintypes.ULONG),
+        ("usCapabilityInformation", _USHORT),
+        ("ulChCenterFrequency", _ULONG),
+        ("wlanRateSet", WLAN_RATE_SET),
+        ("ulIeOffset", _ULONG),  # from the start of *this entry*
+        ("ulIeSize", _ULONG),
     ]
 
 
 class WLAN_BSS_LIST(ctypes.Structure):
     _fields_ = [
-        ("dwTotalSize", wintypes.DWORD),
-        ("dwNumberOfItems", wintypes.DWORD),
+        ("dwTotalSize", _DWORD),
+        ("dwNumberOfItems", _DWORD),
         ("wlanBssEntries", WLAN_BSS_ENTRY * 1),
     ]
 
@@ -165,20 +197,7 @@ class WLAN_BSS_LIST(ctypes.Structure):
 # PHY type → human-readable
 # ---------------------------------------------------------------------------
 
-PHY_TYPE_NAMES = {
-    0: "Unknown",
-    1: "FHSS",
-    2: "DSSS",
-    3: "IR Baseband",
-    4: "802.11a",
-    5: "HRDSSS (802.11b)",
-    6: "802.11g",
-    7: "ERP (802.11g)",
-    8: "802.11n (HT)",
-    9: "802.11ac (VHT)",
-    10: "802.11ax (HE)",
-    11: "802.11be (EHT)",
-}
+# DOT11_PHY_TYPE values: see bss.PHY_TYPE_NAMES (v1 had 6..9 off by one).
 
 
 # ---------------------------------------------------------------------------
@@ -287,12 +306,12 @@ def _load_wlanapi():
 class WLAN_INTERFACE_CAPABILITY(ctypes.Structure):
     """WLAN_INTERFACE_CAPABILITY structure from wlanapi.h."""
     _fields_ = [
-        ("interfaceType", wintypes.DWORD),
-        ("bDot11DSupported", wintypes.BOOL),
-        ("dwMaxDesiredSsidListSize", wintypes.DWORD),
-        ("dwMaxDesiredBssidListSize", wintypes.DWORD),
-        ("dwNumberOfSupportedPhys", wintypes.DWORD),
-        ("dot11PhyTypes", wintypes.DWORD * 64),
+        ("interfaceType", _DWORD),
+        ("bDot11DSupported", _BOOL),
+        ("dwMaxDesiredSsidListSize", _DWORD),
+        ("dwMaxDesiredBssidListSize", _DWORD),
+        ("dwNumberOfSupportedPhys", _DWORD),
+        ("dot11PhyTypes", _DWORD * 64),
     ]
 
 
@@ -318,13 +337,13 @@ class InterfaceCapability:
         return f"{bands} · {gens}  {note_str}".strip()
 
 
+# Keyed by DOT11_PHY_TYPE: 4 ofdm, 5 hrdsss, 6 erp, 7 ht, 8 vht, 9 dmg, 10 he, 11 eht
 PHY_BAND_MAP: dict[int, list[str]] = {
     4: ["5 GHz"],     # 802.11a
     5: ["2.4 GHz"],   # 802.11b
-    6: ["2.4 GHz"],   # 802.11g
-    7: ["2.4 GHz"],   # ERP (802.11g)
-    8: ["2.4 GHz", "5 GHz"],  # 802.11n (HT) — dual-band possible
-    9: ["5 GHz"],     # 802.11ac (VHT)
+    6: ["2.4 GHz"],   # 802.11g (ERP)
+    7: ["2.4 GHz", "5 GHz"],  # 802.11n (HT) — dual-band possible
+    8: ["5 GHz"],     # 802.11ac (VHT)
     10: ["2.4 GHz", "5 GHz", "6 GHz"],  # 802.11ax (HE) — tri-band possible
     11: ["2.4 GHz", "5 GHz", "6 GHz"],  # 802.11be (EHT) — tri-band possible
 }
@@ -333,9 +352,8 @@ PHY_GENERATION_MAP: dict[int, str] = {
     4: "Wi-Fi 2 (802.11a)",
     5: "Wi-Fi 1 (802.11b)",
     6: "Wi-Fi 3 (802.11g)",
-    7: "Wi-Fi 3 (802.11g)",
-    8: "Wi-Fi 4 (802.11n)",
-    9: "Wi-Fi 5 (802.11ac)",
+    7: "Wi-Fi 4 (802.11n)",
+    8: "Wi-Fi 5 (802.11ac)",
     10: "Wi-Fi 6 (802.11ax)",
     11: "Wi-Fi 7 (802.11be)",
 }
@@ -530,7 +548,7 @@ class WiFiScanner:
 
             # Detect missing bands that modern adapters should have
             # Only flag 5 GHz missing if we see Wi-Fi 4+ PHY types (modern adapter)
-            has_modern = any(p >= 8 for p in cap.phy_type_ids)
+            has_modern = any(p >= 7 for p in cap.phy_type_ids)
             if has_modern:
                 cap.missing_5ghz = "5 GHz" not in bands
                 cap.missing_6ghz = "6 GHz" not in bands
@@ -782,93 +800,26 @@ class WiFiScanner:
                 ctypes.POINTER(EntryArray),
             )
 
+            base = ctypes.addressof(p_bss_list.contents.wlanBssEntries)
+            stride = ctypes.sizeof(WLAN_BSS_ENTRY)
             for i in range(count):
                 b = entries_ptr.contents[i]
-
-                # SSID
-                ssid = bytes(
-                    b.dot11Ssid.ucSSID[: b.dot11Ssid.uSSIDLength]
-                ).decode("utf-8", errors="replace")
-
-                # BSSID
-                bssid = ":".join(f"{x:02x}" for x in b.dot11Bssid)
-
-                # Channel / band
-                channel, band = freq_to_channel(b.ulChCenterFrequency)
-
-                # PHY type
-                phy = PHY_TYPE_NAMES.get(
-                    b.dot11BssPhyType,
-                    f"Unknown ({b.dot11BssPhyType})",
-                )
-
-                # Parse information elements
+                entry_addr = base + i * stride
                 ie_data = b""
                 if b.ulIeSize > 0 and b.ulIeOffset > 0:
-                    try:
-                        ie_ptr = ctypes.cast(
-                            ctypes.addressof(p_bss_list.contents)
-                            + b.ulIeOffset,
-                            ctypes.POINTER(
-                                ctypes.c_ubyte * b.ulIeSize),
-                        )
-                        ie_data = bytes(ie_ptr.contents)
-                    except Exception:
-                        ie_data = b""
-
-                ie_info = (
-                    parse_information_elements(
-                        ie_data, band, b.usCapabilityInformation)
-                    if ie_data else {}
-                )
-
-                # Security (no IEs: fall back to the Privacy bit)
-                security = ie_info.get(
-                    "security",
-                    "WEP" if b.usCapabilityInformation & 0x0010 else "Open")
-                auth = ie_info.get("auth_algo", "")
-                cipher = ie_info.get("cipher", "")
-
-                # Channel width
-                channel_width = ie_info.get("channel_width", 20)
-
-                # Max rate
-                max_rate = ie_info.get("max_rate_mbps", 0.0)
-                if max_rate == 0.0:
-                    rates = list(b.wlanRateSet)
-                    if rates:
-                        valid = [r for r in rates if r > 0]
-                        if valid:
-                            max_rate = max(valid) * 0.5
-
-                # Vendor lookup
-                vendor = lookup_vendor(bssid)
-
-                entry = BSSEntry(
-                    bssid=bssid,
-                    ssid=ssid,
+                    ie_data = ctypes.string_at(entry_addr + b.ulIeOffset, b.ulIeSize)
+                entries.append(build_bss_entry(
+                    ssid=bytes(b.dot11Ssid.ucSSID[: min(b.dot11Ssid.uSSIDLength, 32)]),
+                    bssid=bytes(b.dot11Bssid),
                     rssi=b.lRssi,
-                    channel=channel,
-                    channel_width=channel_width,
-                    center_channel=ie_info.get("center_channel", 0),
-                    band=band,
-                    center_frequency=b.ulChCenterFrequency // 1000,
-                    phy_type=phy,
-                    security=security,
-                    auth_algo=auth,
-                    cipher=cipher,
-                    pmf=ie_info.get("pmf", ""),
-                    capability_info=b.usCapabilityInformation,
-                    vendor=vendor,
-                    station_count=ie_info.get("station_count", 0),
-                    channel_utilization=ie_info.get(
-                        "channel_utilization", 0.0),
+                    freq_khz=b.ulChCenterFrequency,
+                    phy_id=b.dot11BssPhyType,
                     beacon_period=b.usBeaconPeriod,
-                    max_rate=max_rate,
-                    ies_raw=ie_data,
-                    timestamp=datetime.now(),
-                )
-                entries.append(entry)
+                    capability=b.usCapabilityInformation,
+                    ies=ie_data,
+                    legacy_max_rate=b.wlanRateSet.max_mbps(),
+                    vendor_lookup=lookup_vendor,
+                ))
 
         finally:
             self._api.WlanFreeMemory(p_bss_list)
