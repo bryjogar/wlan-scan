@@ -135,6 +135,7 @@ class DetailPanel(QWidget):
             ("Cipher", bss.cipher or "—", None),
             ("Auth", bss.auth_algo or "—", None),
             ("Max Rate", f"{bss.max_rate:.0f} Mbps" if bss.max_rate > 0 else "—", None),
+            ("Spatial Streams", str(bss.spatial_streams) if bss.spatial_streams else "—", None),
             ("Beacon Period", f"{bss.beacon_period} TU", None),
             ("Center Freq", f"{bss.center_frequency} MHz" if bss.center_frequency > 0 else "—", None),
             ("Vendor", bss.vendor or "Unknown", None),

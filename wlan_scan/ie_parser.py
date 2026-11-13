@@ -167,7 +167,8 @@ def parse_information_elements(data: bytes, band: Optional[str] = None,
 
     Keys: security, auth_algo, cipher, pmf ("Required"/"Capable"/"Disabled"/""), channel_width, center_channel,
     primary_channel, band, station_count, channel_utilization,
-    max_rate_mbps, ht_supported, vht_supported, he_supported, eht_supported,
+    max_rate_mbps (highest PHY rate the AP advertises; 0 = unknown),
+    spatial_streams, ht_supported, vht_supported, he_supported, eht_supported,
     wifi_generation, supported_modes, phy_type
     """
     result: dict[str, Any] = {
@@ -182,6 +183,7 @@ def parse_information_elements(data: bytes, band: Optional[str] = None,
         "station_count": 0,
         "channel_utilization": 0.0,
         "max_rate_mbps": 0.0,
+        "spatial_streams": 0,
         "ht_supported": False,
         "vht_supported": False,
         "he_supported": False,
@@ -200,6 +202,8 @@ def parse_information_elements(data: bytes, band: Optional[str] = None,
     rsn = None
     wpa1 = None
     owe_transition = False
+    legacy_max = 0.0
+    ht_rate = vht_rate = he_rate = eht_rate = None
 
     for eid, body in iter_elements(data):
         if eid == IE_DS_PARAMETER and len(body) >= 1:
@@ -216,6 +220,10 @@ def parse_information_elements(data: bytes, band: Optional[str] = None,
 
         elif eid == IE_HT_CAPABILITIES and len(body) >= 2:
             result["ht_supported"] = True
+            if len(body) >= 7:
+                info = body[0] | (body[1] << 8)
+                nss = sum(1 for i in range(4) if body[3 + i])
+                ht_rate = (nss, bool(info & 0x0020), bool(info & 0x0040))
 
         elif eid == IE_HT_OPERATION and len(body) >= 2:
             result["ht_supported"] = True
@@ -230,6 +238,11 @@ def parse_information_elements(data: bytes, band: Optional[str] = None,
 
         elif eid == IE_VHT_CAPABILITIES and len(body) >= 4:
             result["vht_supported"] = True
+            if len(body) >= 6:
+                info = body[0] | (body[1] << 8) | (body[2] << 16) | (body[3] << 24)
+                nss, code = _mcs_map_nss(body[4] | (body[5] << 8))
+                vht_rate = (nss, {0: 7, 1: 8, 2: 9}.get(code, 0),
+                            bool(info & (1 << 5)), bool(info & (1 << 6)))
 
         elif eid == IE_VHT_OPERATION and len(body) >= 3:
             result["vht_supported"] = True
@@ -241,6 +254,9 @@ def parse_information_elements(data: bytes, band: Optional[str] = None,
             ext_id, ebody = body[0], body[1:]
             if ext_id == EXT_HE_CAPABILITIES:
                 result["he_supported"] = True
+                if len(ebody) >= 19:  # MAC(6) + PHY(11) + Rx/Tx HE-MCS <=80 (2+2)
+                    nss, code = _mcs_map_nss(ebody[17] | (ebody[18] << 8))
+                    he_rate = (nss, {0: 7, 1: 9, 2: 11}.get(code, 0))
             elif ext_id == EXT_HE_OPERATION and len(ebody) >= 6:
                 result["he_supported"] = True
                 params = ebody[0] | (ebody[1] << 8) | (ebody[2] << 16)
@@ -260,6 +276,13 @@ def parse_information_elements(data: bytes, band: Optional[str] = None,
                     six_ghz_op = (primary, w, centre)
             elif ext_id == EXT_EHT_CAPABILITIES:
                 result["eht_supported"] = True
+                if len(ebody) >= 14:  # MAC(2) + PHY(9) + <=80 MHz set (3)
+                    # one byte per MCS range (0-9, 10-11, 12-13): Rx max NSS in low nibble
+                    sets = ebody[11:14]
+                    for mcs, byte in ((13, sets[2]), (11, sets[1]), (9, sets[0])):
+                        if byte & 0x0F:
+                            eht_rate = (byte & 0x0F, mcs)
+                            break
             elif ext_id == EXT_EHT_OPERATION and len(ebody) >= 5:
                 result["eht_supported"] = True
                 if ebody[0] & 0x01 and len(ebody) >= 8:  # EHT Operation Information present
@@ -274,9 +297,9 @@ def parse_information_elements(data: bytes, band: Optional[str] = None,
 
         elif eid in (IE_SUPPORTED_RATES, IE_EXTENDED_RATES):
             for rate_byte in body:
-                rate = (rate_byte & 0x7F) * 0.5
-                if rate > result["max_rate_mbps"]:
-                    result["max_rate_mbps"] = rate
+                if rate_byte in (0xFF, 0xFE):  # BSS membership selectors (HT/VHT/SAE-H2E)
+                    continue
+                legacy_max = max(legacy_max, (rate_byte & 0x7F) * 0.5)
 
     # ----- security -----
     privacy = None if capability is None else bool(capability & CAP_PRIVACY)
@@ -317,6 +340,11 @@ def parse_information_elements(data: bytes, band: Optional[str] = None,
     result["center_channel"] = centre
     result["primary_channel"] = primary
 
+    # ----- max PHY rate -----
+    rate, nss = max_phy_rate(width, b, ht_rate, vht_rate, he_rate, eht_rate)
+    result["max_rate_mbps"] = rate or legacy_max
+    result["spatial_streams"] = nss
+
     # ----- generation / modes / PHY -----
     gen, modes, phy = _generation(result, b)
     result["wifi_generation"] = gen
@@ -324,6 +352,54 @@ def parse_information_elements(data: bytes, band: Optional[str] = None,
     result["phy_type"] = phy
 
     return result
+
+
+def _mcs_map_nss(mcs_map: int) -> tuple[int, int]:
+    """VHT/HE MCS map (2 bits per stream, 3 = unsupported) → (NSS, code of SS1)."""
+    nss = 0
+    for ss in range(8):
+        if (mcs_map >> (2 * ss)) & 3 != 3:
+            nss = ss + 1
+    return nss, (mcs_map & 3) if nss else 3
+
+
+# Bits per subcarrier x coding rate, by MCS index (802.11n/ac/ax/be share it)
+_MCS_BITS = [0.5, 1, 1.5, 2, 3, 4, 4.5, 5, 6, 20 / 3, 7.5, 25 / 3, 9, 10]
+# Data subcarriers by width: HT/VHT and HE/EHT
+_NSD_VHT = {20: 52, 40: 108, 80: 234, 160: 468}
+_NSD_HE = {20: 234, 40: 468, 80: 980, 160: 1960, 320: 3920}
+
+
+def _rate(nsd: int, mcs: int, nss: int, symbol_us: float) -> float:
+    return nsd * _MCS_BITS[mcs] * nss / symbol_us
+
+
+def max_phy_rate(width: int, band: Optional[str], ht=None, vht=None, he=None,
+                 eht=None) -> tuple[float, int]:
+    """Highest PHY rate (Mbps) the AP advertises at its operating width.
+
+    ht = (nss, sgi20, sgi40); vht = (nss, max_mcs, sgi80, sgi160);
+    he = (nss, max_mcs); eht = (nss, max_mcs). Returns (Mbps, NSS); (0, 0)
+    when no HT+ capabilities were seen. HE/EHT use 0.8 us GI (13.6 us symbol).
+    """
+    if eht and eht[0] and width in _NSD_HE:
+        nss, mcs = eht
+        return round(_rate(_NSD_HE[width], mcs, nss, 13.6), 1), nss
+    if he and he[0] and width in _NSD_HE and width <= 160:
+        nss, mcs = he
+        return round(_rate(_NSD_HE[width], mcs, nss, 13.6), 1), nss
+    if vht and vht[0] and band != BAND_24 and width in _NSD_VHT:
+        nss, mcs, sgi80, sgi160 = vht
+        if width == 20 and mcs == 9 and nss not in (3, 6):
+            mcs = 8  # VHT MCS 9 is invalid at 20 MHz except for 3/6 streams
+        sgi = sgi160 if width == 160 else (sgi80 if width == 80 else True)
+        return round(_rate(_NSD_VHT[width], mcs, nss, 3.6 if sgi else 4.0), 1), nss
+    if ht and ht[0]:
+        nss, sgi20, sgi40 = ht
+        w = 40 if width >= 40 else 20
+        sgi = sgi40 if w == 40 else sgi20
+        return round(_rate(_NSD_VHT[w], 7, min(nss, 4), 3.6 if sgi else 4.0), 1), nss
+    return 0.0, 0
 
 
 def _generation(r: dict, band: Optional[str]) -> tuple[str, str, str]:
@@ -507,3 +583,5 @@ def apply_ies(bss) -> None:
     bss.channel_utilization = info["channel_utilization"]
     bss.wifi_generation = info["wifi_generation"]
     bss.supported_modes = info["supported_modes"]
+    bss.max_rate = info["max_rate_mbps"]
+    bss.spatial_streams = info["spatial_streams"]

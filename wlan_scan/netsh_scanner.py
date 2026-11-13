@@ -286,8 +286,8 @@ def scan() -> ScanResult:
             security, auth_algo, cipher = _normalize_security(
                 current_auth, current_encryption)
 
-            max_rate = _parse_max_rate(
-                f"{current_basic_rates} {current_other_rates}")
+            # netsh only lists legacy rates (max 54 Mbps): not a PHY max, so blank.
+            max_rate = 0.0
 
             vendor = lookup_vendor(bssid)
 

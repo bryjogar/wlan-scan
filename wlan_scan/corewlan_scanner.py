@@ -6,7 +6,8 @@ Proper macOS API — no private-CLI text parsing. Gives per-network:
 
 Not available via public macOS APIs (Windows gets these from raw IE
 parsing, which CoreWLAN does not expose):
-    station_count, channel_utilization, max_rate, raw IEs, per-network PHY.
+    station_count, channel_utilization, max_rate (left blank), raw IEs,
+    per-network PHY.
 
 pyobjc is macOS-only: this module imports lazily inside scan(), so the
 package still imports on Windows/Linux.
@@ -90,19 +91,6 @@ def _wifi_generation(width: int, band: str) -> str:
     return "Wi-Fi 4"
 
 
-def _max_rate_hint(width: int, band: str) -> float:
-    """Coarse max-rate estimate from width+band (no MCS info on macOS)."""
-    if band == "2.4 GHz":
-        return 300.0 if width >= 40 else 150.0
-    if width >= 160:
-        return 2400.0
-    if width >= 80:
-        return 1200.0
-    if width >= 40:
-        return 600.0
-    return 300.0
-
-
 def corewlan_available() -> bool:
     """True when pyobjc CoreWLAN can be imported (macOS only)."""
     if sys.platform != "darwin":
@@ -168,7 +156,6 @@ def scan(interface: str = "", debug: Optional[Callable[[str], None]] = None) -> 
                 auth_algo=auth,
                 vendor=lookup_vendor(bssid),
                 wifi_generation=_wifi_generation(width, band),
-                max_rate=_max_rate_hint(width, band),
                 beacon_period=beacon,
                 timestamp=result.timestamp,
             )

@@ -29,7 +29,8 @@ class BSSEntry:
     station_count: int = 0
     channel_utilization: float = 0.0  # 0-100%
     beacon_period: int = 0
-    max_rate: float = 0.0  # Mbps
+    max_rate: float = 0.0  # Mbps: highest PHY rate the AP advertises (0 = unknown)
+    spatial_streams: int = 0  # AP's spatial streams from HT/VHT/HE/EHT caps (0 = unknown)
     ies_raw: bytes = field(default_factory=bytes, repr=False)
     timestamp: datetime = field(default_factory=datetime.now)
 

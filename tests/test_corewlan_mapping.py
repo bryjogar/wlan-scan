@@ -2,14 +2,13 @@
 
 The pyobjc CoreWLAN module only exists on macOS, so these tests cover the
 pure mapping helpers: security enum → (security, auth), channel → band,
-width → generation, and the rate estimate.
+width → generation.
 """
 
 from wlan_scan.corewlan_scanner import (
     _security_from_cw,
     _band_from_channel,
     _wifi_generation,
-    _max_rate_hint,
 )
 
 
@@ -44,8 +43,3 @@ def test_generation_from_width_band():
     assert _wifi_generation(20, "6 GHz") == "Wi-Fi 6E"
 
 
-def test_max_rate_hint():
-    assert _max_rate_hint(20, "2.4 GHz") == 150.0
-    assert _max_rate_hint(40, "2.4 GHz") == 300.0
-    assert _max_rate_hint(80, "5 GHz") == 1200.0
-    assert _max_rate_hint(160, "5 GHz") == 2400.0

@@ -55,7 +55,7 @@ def build_bss_entry(
     beacon_period: int = 0,
     capability: int = 0,
     ies: bytes = b"",
-    legacy_max_rate: float = 0.0,
+    legacy_max_rate: float = 0.0,  # from WLAN_RATE_SET; used only without IEs
     vendor_lookup=None,
     timestamp: Optional[datetime] = None,
 ) -> BSSEntry:
@@ -90,6 +90,8 @@ def build_bss_entry(
         entry.channel_utilization = info["channel_utilization"]
         entry.wifi_generation = info["wifi_generation"]
         entry.supported_modes = info["supported_modes"]
+        entry.max_rate = info["max_rate_mbps"] or float(legacy_max_rate or 0.0)
+        entry.spatial_streams = info["spatial_streams"]
         if phy_id in (0, 1, 2, 3) or phy.startswith("Unknown"):
             entry.phy_type = info["phy_type"]
         if not channel and info["primary_channel"]:

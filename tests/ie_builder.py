@@ -122,7 +122,7 @@ def eht_cap(w320: bool = False, nss: int = 2) -> bytes:
         phy[0] |= 0x02  # B1: 320 MHz in 6 GHz
     n = nss & 0xF
     mcs = bytes([n | (n << 4)] * 3)  # rx/tx max NSS for MCS 0-9,10-11,12-13
-    sets = mcs * (3 if not w320 else 4)  # <=80, 160, (320)
+    sets = mcs * (3 if w320 else 2)  # <=80, 160, (320)
     return ext(108, mac + bytes(phy) + sets)
 
 
