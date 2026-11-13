@@ -68,6 +68,8 @@ class ScanResult:
     networks: list[Network] = field(default_factory=list)
     interface_name: str = ""
     interface_guid: str = ""
+    scan_duration: float = 0.0  # seconds the backend took (set by the worker)
+    backend: str = ""  # backend that produced it (set by the worker)
 
 
 def group_networks(entries: Iterable[BSSEntry]) -> list[Network]:

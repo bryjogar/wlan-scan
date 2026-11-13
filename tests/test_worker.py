@@ -43,4 +43,5 @@ def test_main_window_with_replay(qtbot):
     qtbot.addWidget(win)
     qtbot.waitUntil(lambda: win._scan_count >= 1, timeout=8000)
     assert win._status_backend.text() == "Backend: replay"
+    assert "s/scan" in win._status_scan.text()
     win.close()

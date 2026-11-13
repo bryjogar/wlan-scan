@@ -14,7 +14,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Callable, Optional
 
-from .models import BSSEntry, Network, ScanResult
+from .models import BSSEntry, ScanResult, group_networks
+from .scan_cycle import ScanCycle
 from .bss import build_bss_entry
 from .channels import freq_to_channel as _freq_to_channel_mhz
 from .vendors import lookup_vendor
@@ -197,6 +198,40 @@ class WLAN_BSS_LIST(ctypes.Structure):
 # PHY type → human-readable
 # ---------------------------------------------------------------------------
 
+class WLAN_NOTIFICATION_DATA(ctypes.Structure):
+    _fields_ = [
+        ("NotificationSource", _DWORD),
+        ("NotificationCode", _DWORD),
+        ("InterfaceGuid", GUID),
+        ("dwDataSize", _DWORD),
+        ("pData", ctypes.c_void_p),
+    ]
+
+
+WLAN_NOTIFICATION_SOURCE_NONE = 0x00000000
+WLAN_NOTIFICATION_SOURCE_ACM = 0x00000008
+WLAN_NOTIFICATION_ACM_SCAN_COMPLETE = 7
+WLAN_NOTIFICATION_ACM_SCAN_FAIL = 8
+
+_CALLBACK_FACTORY = getattr(ctypes, "WINFUNCTYPE", ctypes.CFUNCTYPE)
+WLAN_NOTIFICATION_CALLBACK = _CALLBACK_FACTORY(
+    None, ctypes.POINTER(WLAN_NOTIFICATION_DATA), ctypes.c_void_p)
+
+
+def is_scan_done_notification(data: WLAN_NOTIFICATION_DATA,
+                              guid: Optional["GUID"]) -> Optional[bool]:
+    """None if unrelated; False = scan complete; True = scan failed."""
+    if data.NotificationSource != WLAN_NOTIFICATION_SOURCE_ACM:
+        return None
+    if guid is not None and bytes(data.InterfaceGuid) != bytes(guid):
+        return None
+    if data.NotificationCode == WLAN_NOTIFICATION_ACM_SCAN_COMPLETE:
+        return False
+    if data.NotificationCode == WLAN_NOTIFICATION_ACM_SCAN_FAIL:
+        return True
+    return None
+
+
 # DOT11_PHY_TYPE values: see bss.PHY_TYPE_NAMES (v1 had 6..9 off by one).
 
 
@@ -280,6 +315,18 @@ def _load_wlanapi():
         ctypes.POINTER(ctypes.POINTER(WLAN_AVAILABLE_NETWORK_LIST)),
     ]
     _wlanapi.WlanGetAvailableNetworkList.restype = wintypes.DWORD
+
+    # WlanRegisterNotification
+    _wlanapi.WlanRegisterNotification.argtypes = [
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        wintypes.BOOL,
+        WLAN_NOTIFICATION_CALLBACK,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    _wlanapi.WlanRegisterNotification.restype = wintypes.DWORD
 
     # WlanFreeMemory
     _wlanapi.WlanFreeMemory.argtypes = [ctypes.c_void_p]
@@ -385,8 +432,8 @@ class WiFiScanner:
         self._handle: Optional[wintypes.HANDLE] = None
         self._interface_guid: Optional[GUID] = None
         self._interface_name: str = ""
-        self._last_scan_time: float = 0.0
-        self._scan_cooldown: float = 1.5  # seconds between scans
+        self._cycle = ScanCycle(self.trigger_scan, self._read_cached, timeout=4.0)
+        self._notify_cb = None  # keep the ctypes callback alive while registered
         self._on_debug: Optional[Callable[[str], None]] = None
         self._capability: Optional[InterfaceCapability] = None
 
@@ -460,9 +507,15 @@ class WiFiScanner:
         if negotiated.value == 0:
             self._dbg("WARNING: Negotiated version 0 — API may not work!")
 
+        self._register_notifications()
+
     def close(self):
         """Close the WLAN API handle."""
         if self._handle is not None:
+            try:
+                self._unregister_notifications()
+            except Exception:
+                pass
             self._api.WlanCloseHandle(self._handle, None)
             self._handle = None
 
@@ -479,12 +532,45 @@ class WiFiScanner:
             self._on_debug(msg)
 
     @property
-    def scan_cooldown(self) -> float:
-        return self._scan_cooldown
+    def last_cycle(self):
+        """Timing of the last scan: triggered, completed_by, duration."""
+        return self._cycle.last
 
-    @scan_cooldown.setter
-    def scan_cooldown(self, value: float):
-        self._scan_cooldown = max(0.0, value)
+    def request_stop(self) -> None:
+        """Make a scan waiting for its completion notification return now."""
+        self._cycle.request_stop()
+
+    # ----- scan-complete notifications -----
+
+    def _register_notifications(self) -> None:
+        def on_notify(p_data, _ctx):
+            try:
+                failed = is_scan_done_notification(p_data.contents, self._interface_guid)
+                if failed is not None:
+                    self._cycle.notify_complete(failed)
+            except Exception:
+                pass  # never raise into wlanapi's thread
+
+        cb = WLAN_NOTIFICATION_CALLBACK(on_notify)
+        prev = wintypes.DWORD()
+        r = self._api.WlanRegisterNotification(
+            self._handle, WLAN_NOTIFICATION_SOURCE_ACM, True, cb, None, None,
+            ctypes.byref(prev))
+        if r == ERROR_SUCCESS:
+            self._notify_cb = cb
+            self._dbg("Scan-complete notifications registered")
+        else:
+            self._dbg(f"WlanRegisterNotification failed: {_wlan_error_string(r)} "
+                      f"— scans will wait up to {self._cycle.timeout:.0f} s")
+
+    def _unregister_notifications(self) -> None:
+        if self._notify_cb is None or self._handle is None:
+            return
+        prev = wintypes.DWORD()
+        self._api.WlanRegisterNotification(
+            self._handle, WLAN_NOTIFICATION_SOURCE_NONE, True,
+            WLAN_NOTIFICATION_CALLBACK(), None, None, ctypes.byref(prev))
+        self._notify_cb = None
 
     @property
     def capability(self) -> Optional[InterfaceCapability]:
@@ -663,87 +749,44 @@ class WiFiScanner:
     # ----- scanning -----
 
     def trigger_scan(self) -> bool:
-        """Trigger an active scan. Returns True if scan was initiated.
+        """Ask the driver for an active scan. Returns True if it was accepted.
 
-        Note: Windows 11 may reject WlanScan for various reasons
-        (background scan in progress, driver policy, etc.).
-        This is non-fatal — subsequent WlanGetNetworkBssList calls
-        will use cached results from Windows background scans.
+        Windows may reject WlanScan (scan already running, driver policy);
+        that is non-fatal: the cached list from background scans is read.
         """
-        now = time.monotonic()
-        if now - self._last_scan_time < self._scan_cooldown:
-            time.sleep(self._scan_cooldown - (now - self._last_scan_time))
-
         result = self._api.WlanScan(
             self._handle,
             ctypes.byref(self._interface_guid),
             None, None, None,
         )
-        self._last_scan_time = time.monotonic()
+        if result != ERROR_SUCCESS:
+            self._dbg(f"WlanScan: {_wlan_error_string(result)} (using cached scan data)")
+            return False
+        return True
 
-        ok = result == ERROR_SUCCESS
-        if not ok:
-            self._dbg(f"WlanScan: {_wlan_error_string(result)} "
-                      f"(will use cached scan data)")
-        else:
-            self._dbg("WlanScan OK")
-        return ok
+    def _read_cached(self) -> list[BSSEntry]:
+        return self._get_bss_list()
+
+    def read_cached_results(self) -> ScanResult:
+        """The BSS list Windows already has, without triggering a scan."""
+        return self._to_result(self._get_bss_list())
 
     def get_scan_results(self) -> ScanResult:
-        """Perform a scan and return structured results.
+        """Trigger a scan, wait for its completion notification (or the
+        timeout), and return the BSS list."""
+        bss_list = self._cycle.run()
+        st = self._cycle.last
+        self._dbg(f"Scan {st.completed_by} in {st.duration:.2f} s: "
+                  f"{len(bss_list)} BSS entries")
+        return self._to_result(bss_list)
 
-        Attempts WlanScan first; falls back to reading cached BSS list
-        from Windows background scans if the explicit scan fails.
-        """
-        self._dbg("Triggering scan...")
-        scan_ok = self.trigger_scan()
-
-        if scan_ok:
-            time.sleep(2.0)
-        else:
-            self._dbg(
-                "WlanScan not available — using cached results from "
-                "Windows background scans"
-            )
-            time.sleep(0.5)
-
-        scan = ScanResult(
+    def _to_result(self, bss_list: list[BSSEntry]) -> ScanResult:
+        return ScanResult(
             timestamp=datetime.now(),
+            networks=group_networks(bss_list),
             interface_name=self._interface_name,
             interface_guid=str(self._interface_guid),
         )
-
-        bss_list = self._get_bss_list()
-        self._dbg(f"Got {len(bss_list)} BSS entries")
-
-        # If BSS list is empty, try a few more times (delayed scan completion)
-        retries = 3 if scan_ok else 2
-        attempt = 0
-        while len(bss_list) == 0 and attempt < retries:
-            attempt += 1
-            self._dbg(f"Empty BSS list, retry {attempt}/{retries}...")
-            time.sleep(1.5)
-            bss_list = self._get_bss_list()
-            self._dbg(f"Retry {attempt}: {len(bss_list)} BSS entries")
-
-        networks_by_ssid: dict[str, Network] = {}
-
-        for bss in bss_list:
-            ssid_key = bss.ssid or "<Hidden>"
-            if ssid_key not in networks_by_ssid:
-                networks_by_ssid[ssid_key] = Network(ssid=bss.ssid)
-            networks_by_ssid[ssid_key].bss_list.append(bss)
-
-        for net in networks_by_ssid.values():
-            net.refresh_summary()
-
-        # Sort: strongest signal first, known SSIDs before hidden
-        def sort_key(n: Network) -> tuple:
-            return (n.ssid == "<Hidden>", -n.best_rssi)
-
-        scan.networks = sorted(networks_by_ssid.values(), key=sort_key)
-        self._dbg(f"Returning {len(scan.networks)} networks")
-        return scan
 
     def _get_bss_list(self) -> list[BSSEntry]:
         """Retrieve the BSS list from wlanapi and parse into BSSEntry objects.

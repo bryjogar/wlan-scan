@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
 from ..models import Network, ScanResult
 from ..backends import candidate_backends, open_first
 from ..recording import ScanRecorder
+from ..scan_cycle import RateMeter
 from ..logging_setup import get_logger
 from .styles import DARK_THEME, BAND_COLORS
 from .channel_map import ChannelMapWidget
@@ -82,10 +83,13 @@ class ScannerWorker(QThread):
             self.scan_error.emit("No Wi-Fi scanner backend is available on this system.")
 
         while self._running and backend is not None:
+            cycle_start = time.monotonic()
             if not self._paused:
                 try:
                     self.scan_started.emit()
                     result = backend.scan()
+                    result.scan_duration = time.monotonic() - cycle_start
+                    result.backend = backend.name
                     if recorder:
                         recorder.write(result)
                     self.scan_complete.emit(result)
@@ -100,11 +104,12 @@ class ScannerWorker(QThread):
                             pass
                         backend, fallbacks = self._activate(fallbacks)
                         continue
-            # Wait for next scan
-            slept = 0
-            while self._running and slept < self._interval:
-                time.sleep(0.1)
-                slept += 0.1
+            # Interval is start-to-start: a 3 s scan at a 5 s interval waits 2 s;
+            # a scan longer than the interval is followed by the next at once.
+            remaining = self._interval - (time.monotonic() - cycle_start)
+            while self._running and remaining > 0:
+                time.sleep(min(0.1, remaining))
+                remaining = self._interval - (time.monotonic() - cycle_start)
 
         if backend is not None:
             try:
@@ -142,6 +147,7 @@ class MainWindow(QMainWindow):
         self.setStyleSheet(DARK_THEME)
 
         self._last_result: ScanResult | None = None
+        self._rate = RateMeter()
         self._scan_count: int = 0
         self._conn_bssid: str | None = None
         self._conn_bssid_ts: float = 0
@@ -511,6 +517,7 @@ class MainWindow(QMainWindow):
         )
         interval = float(self._interval_combo.currentText().replace("s", ""))
         self._worker.set_interval(interval)
+        self._rate.reset()
         self._worker.start()
 
     @Slot(str)
@@ -589,9 +596,16 @@ class MainWindow(QMainWindow):
         self._status_networks.setText(
             f"Networks: {len(result.networks)}  |  BSS: {total_bss}"
         )
+        period = self._rate.tick()
+        rate = f"{result.scan_duration:.1f} s/scan"
+        if period:
+            rate += f", every {period:.1f} s"
         self._status_scan.setText(
-            f"Scan #{self._scan_count}  |  {elapsed}s elapsed"
+            f"Scan #{self._scan_count}  |  {rate}  |  {elapsed}s elapsed"
         )
+        self._status_scan.setToolTip(
+            "Measured: how long the last scan took, and the smoothed time "
+            "between completed scans (the interval setting is a minimum).")
         self._scan_count_lbl.setText(
             f"Scan #{self._scan_count} · {total_bss} BSS found"
         )
