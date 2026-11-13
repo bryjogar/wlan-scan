@@ -15,10 +15,8 @@ from PySide6.QtWidgets import (
 )
 
 from ..models import Network, ScanResult
-from ..scanner import WiFiScanner
+from ..backends import candidate_backends, open_first
 from ..logging_setup import get_logger
-from .. import netsh_scanner
-from ..pwsh_scanner import PwshScanner
 from .styles import DARK_THEME, BAND_COLORS
 from .channel_map import ChannelMapWidget
 from .signal_graph import SignalGraphWidget
@@ -40,148 +38,71 @@ class UpdateAvailableEvent(QEvent):
 
 
 class ScannerWorker(QThread):
-    """Background thread for Wi-Fi scanning."""
+    """Background thread for Wi-Fi scanning.
+
+    Picks a backend from ``backends.candidate_backends()`` and falls back
+    down the list when the active one fails.
+    """
 
     scan_complete = Signal(object)  # ScanResult
     scan_error = Signal(str)
     scan_started = Signal()
     debug_message = Signal(str)
     capability_detected = Signal(object)  # InterfaceCapability
+    backend_changed = Signal(str)  # name of the active backend ("" = none)
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, replay: str | None = None):
         super().__init__(parent)
         self._running = False
         self._paused = False
         self._interval = 3.0  # seconds between scans
+        self._replay = replay
+        self.backend_name = ""
+
+    def _activate(self, factories):
+        """Open the first working backend from ``factories``."""
+        backend, rest = open_first(factories, debug=self.debug_message.emit)
+        self.backend_name = backend.name if backend else ""
+        self.backend_changed.emit(self.backend_name)
+        if backend is not None:
+            cap = backend.capability()
+            if cap is not None and getattr(cap, "supported_bands", None):
+                self.capability_detected.emit(cap)
+        return backend, rest
 
     def run(self):
         self._running = True
-        use_netsh = False
-        use_pwsh = False
-        use_mac = False
-        scanner = None
-        pwsh_scanner = None
-        mac_scanner = None
+        backend, fallbacks = self._activate(
+            candidate_backends(replay=self._replay))
+        if backend is None:
+            self.scan_error.emit("No Wi-Fi scanner backend is available on this system.")
 
-        # macOS: use the airport CLI scanner
-        if sys.platform == "darwin":
-            from ..macos_scanner import MacScanner, is_available
-            if not is_available():
-                self.debug_message.emit("✗ airport CLI not found on this macOS.")
-            else:
-                use_mac = True
-                mac_scanner = MacScanner()
-                mac_scanner.set_debug_callback(
-                    lambda msg: self.debug_message.emit(msg))
-                self.debug_message.emit("Using macOS airport CLI scanner")
-
-        # ARM64 Windows: ctypes wlanapi is broken (libffi issue).
-        # Use .NET P/Invoke bridge instead.
-        if sys.platform == "win32":
-            try:
-                import platform
-                arch = platform.machine().lower()
-                if "arm" in arch or "aarch" in arch:
-                    self.debug_message.emit(
-                        f"ARM64 detected ({arch}) — using PowerShell/.NET P/Invoke bridge")
-                    use_pwsh = True
-            except Exception:
-                pass
-
-        if use_pwsh:
-            pwsh_scanner = PwshScanner()
-            pwsh_scanner.set_debug_callback(
-                lambda msg: self.debug_message.emit(msg))
-        else:
-            # Try ctypes wlanapi scanner first
-            try:
-                scanner = WiFiScanner()
-                scanner.set_debug_callback(
-                    lambda msg: self.debug_message.emit(msg))
-                scanner.open()
-
-                # Run diagnostics
-                self.debug_message.emit("─── Scanner Diagnostics ───")
-                diag = scanner.run_diagnostics()
-                for line in diag:
-                    self.debug_message.emit(line)
-                self.debug_message.emit("─── End Diagnostics ───")
-
-                # Detect interface capabilities (bands, Wi-Fi generations)
-                try:
-                    cap = scanner.detect_capability()
-                    if cap and cap.supported_bands:
-                        self.capability_detected.emit(cap)
-                except Exception as cap_e:
-                    self.debug_message.emit(f"Capability detection: {cap_e}")
-
-                # Check if ANY call succeeded
-                any_ok = any(line.startswith("✓") for line in diag)
-                if not any_ok:
-                    self.debug_message.emit(
-                        "⚠ wlanapi unavailable — falling back to netsh wlan")
-                    scanner.close()
-                    scanner = None
-                    use_netsh = True
-            except Exception as e:
-                self.debug_message.emit(f"wlanapi init failed: {e}")
-                self.debug_message.emit("Falling back to netsh wlan...")
-                use_netsh = True
-                if scanner:
-                    try:
-                        scanner.close()
-                    except Exception:
-                        pass
-                scanner = None
-
-        while self._running:
+        while self._running and backend is not None:
             if not self._paused:
                 try:
                     self.scan_started.emit()
-                    if use_mac:
-                        result = mac_scanner.scan()
-                    elif use_pwsh:
-                        try:
-                            result = pwsh_scanner.scan()
-                        except Exception as pwsh_err:
-                            self.debug_message.emit(
-                                f"PowerShell scanner failed: {pwsh_err}")
-                            self.debug_message.emit(
-                                "Falling back to netsh wlan...")
-                            result = netsh_scanner.scan()
-                            use_pwsh = False  # don't keep retrying
-                    elif use_netsh:
-                        result = netsh_scanner.scan()
-                    else:
-                        result = scanner.get_scan_results()
+                    result = backend.scan()
                     self.scan_complete.emit(result)
                 except Exception as e:
-                    # If netsh also fails, try it as a last resort
-                    if use_pwsh:
+                    self.scan_error.emit(f"{backend.name}: {e}")
+                    if fallbacks:
+                        self.debug_message.emit(
+                            f"{backend.name} failed — trying next backend")
                         try:
-                            self.debug_message.emit(
-                                "Last resort: trying netsh wlan...")
-                            result = netsh_scanner.scan()
-                            self.scan_complete.emit(result)
-                            use_pwsh = False
-                            continue
+                            backend.close()
                         except Exception:
                             pass
-                    self.scan_error.emit(str(e))
+                        backend, fallbacks = self._activate(fallbacks)
+                        continue
             # Wait for next scan
             slept = 0
             while self._running and slept < self._interval:
                 time.sleep(0.1)
                 slept += 0.1
 
-        if scanner:
+        if backend is not None:
             try:
-                scanner.close()
-            except Exception:
-                pass
-        if mac_scanner:
-            try:
-                mac_scanner.close()
+                backend.close()
             except Exception:
                 pass
 
@@ -201,8 +122,9 @@ class ScannerWorker(QThread):
 class MainWindow(QMainWindow):
     """WLAN Scan main application window."""
 
-    def __init__(self):
+    def __init__(self, replay: str | None = None, check_updates: bool = True):
         super().__init__()
+        self._replay = replay
         self.setWindowTitle("WLAN Scan")
         self.setWindowIcon(self._app_icon())
         self.setMinimumSize(1200, 800)
@@ -222,7 +144,8 @@ class MainWindow(QMainWindow):
         self._setup_scanner()
 
         # Check for updates in background (non-blocking)
-        self._check_for_updates()
+        if check_updates:
+            self._check_for_updates()
 
     @staticmethod
     def _app_icon() -> QIcon:
@@ -479,6 +402,10 @@ class MainWindow(QMainWindow):
         self._status_scan.setStyleSheet("color: #808080; padding: 2px 8px;")
         self._statusbar.addPermanentWidget(self._status_scan)
 
+        self._status_backend = QLabel("")
+        self._status_backend.setStyleSheet("color: #808080; padding: 2px 8px;")
+        self._statusbar.addPermanentWidget(self._status_backend)
+
         self._status_capability = QLabel("")
         self._status_capability.setStyleSheet("color: #808080; padding: 2px 8px;")
         self._statusbar.addPermanentWidget(self._status_capability)
@@ -497,12 +424,13 @@ class MainWindow(QMainWindow):
         self._logger = get_logger()
         self._logger.info("WLAN Scan GUI starting")
 
-        self._worker = ScannerWorker()
+        self._worker = ScannerWorker(replay=self._replay)
         self._worker.scan_complete.connect(self._on_scan_complete)
         self._worker.scan_error.connect(self._on_scan_error)
         self._worker.scan_started.connect(self._on_scan_started)
         self._worker.debug_message.connect(self._on_debug_message)
         self._worker.capability_detected.connect(self._on_capability_detected)
+        self._worker.backend_changed.connect(self._on_backend_changed)
 
         # Check platform
         if sys.platform != "win32":
@@ -571,6 +499,11 @@ class MainWindow(QMainWindow):
         interval = float(self._interval_combo.currentText().replace("s", ""))
         self._worker.set_interval(interval)
         self._worker.start()
+
+    @Slot(str)
+    def _on_backend_changed(self, name: str):
+        self._status_backend.setText(f"Backend: {name}" if name else "No scanner")
+        self._logger.info(f"Active scanner backend: {name or 'none'}")
 
     @Slot(object)
     def _on_capability_detected(self, cap):
