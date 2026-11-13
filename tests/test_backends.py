@@ -21,6 +21,12 @@ def test_macos_order():
     assert _names(candidate_backends("darwin", "arm64")) == ["corewlan", "airport"]
 
 
+def test_replay_overrides_platform(tmp_path):
+    f = tmp_path / "r.jsonl"
+    f.write_text("")
+    assert _names(candidate_backends("win32", "AMD64", replay=str(f))) == ["replay"]
+
+
 class _Broken(BaseBackend):
     name = "broken"
 

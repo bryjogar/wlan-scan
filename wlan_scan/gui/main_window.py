@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
 
 from ..models import Network, ScanResult
 from ..backends import candidate_backends, open_first
+from ..recording import ScanRecorder
 from ..logging_setup import get_logger
 from .styles import DARK_THEME, BAND_COLORS
 from .channel_map import ChannelMapWidget
@@ -51,12 +52,14 @@ class ScannerWorker(QThread):
     capability_detected = Signal(object)  # InterfaceCapability
     backend_changed = Signal(str)  # name of the active backend ("" = none)
 
-    def __init__(self, parent=None, replay: str | None = None):
+    def __init__(self, parent=None, replay: str | None = None,
+                 record: str | None = None):
         super().__init__(parent)
         self._running = False
         self._paused = False
         self._interval = 3.0  # seconds between scans
         self._replay = replay
+        self._record = record
         self.backend_name = ""
 
     def _activate(self, factories):
@@ -72,6 +75,7 @@ class ScannerWorker(QThread):
 
     def run(self):
         self._running = True
+        recorder = ScanRecorder(self._record) if self._record else None
         backend, fallbacks = self._activate(
             candidate_backends(replay=self._replay))
         if backend is None:
@@ -82,6 +86,8 @@ class ScannerWorker(QThread):
                 try:
                     self.scan_started.emit()
                     result = backend.scan()
+                    if recorder:
+                        recorder.write(result)
                     self.scan_complete.emit(result)
                 except Exception as e:
                     self.scan_error.emit(f"{backend.name}: {e}")
@@ -105,6 +111,8 @@ class ScannerWorker(QThread):
                 backend.close()
             except Exception:
                 pass
+        if recorder:
+            recorder.close()
 
     def stop(self):
         self._running = False
@@ -122,9 +130,11 @@ class ScannerWorker(QThread):
 class MainWindow(QMainWindow):
     """WLAN Scan main application window."""
 
-    def __init__(self, replay: str | None = None, check_updates: bool = True):
+    def __init__(self, replay: str | None = None, record: str | None = None,
+                 check_updates: bool = True):
         super().__init__()
         self._replay = replay
+        self._record = record
         self.setWindowTitle("WLAN Scan")
         self.setWindowIcon(self._app_icon())
         self.setMinimumSize(1200, 800)
@@ -424,7 +434,7 @@ class MainWindow(QMainWindow):
         self._logger = get_logger()
         self._logger.info("WLAN Scan GUI starting")
 
-        self._worker = ScannerWorker(replay=self._replay)
+        self._worker = ScannerWorker(replay=self._replay, record=self._record)
         self._worker.scan_complete.connect(self._on_scan_complete)
         self._worker.scan_error.connect(self._on_scan_error)
         self._worker.scan_started.connect(self._on_scan_started)

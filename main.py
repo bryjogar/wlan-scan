@@ -4,21 +4,37 @@ Usage:
     python main.py              # Launch the GUI
     python main.py --cli        # Command-line scan (no GUI)
     python main.py --export     # Scan and export CSV (no GUI)
+    python main.py --record F   # Also append every scan to F (JSON lines)
+    python main.py --replay F   # Play back a recording instead of scanning
 """
 
+import argparse
 import sys
-import os
+
+
+def parse_args(argv=None):
+    p = argparse.ArgumentParser(prog="wlan-scan", description="WLAN Scan")
+    p.add_argument("--cli", action="store_true", help="command-line scan (no GUI)")
+    p.add_argument("--export", action="store_true", help="scan and export CSV (no GUI)")
+    p.add_argument("--record", metavar="FILE",
+                   help="append every scan to FILE as JSON lines")
+    p.add_argument("--replay", metavar="FILE",
+                   help="play back a recording instead of scanning")
+    # Qt may add its own arguments; ignore anything we don't know.
+    args, _unknown = p.parse_known_args(argv)
+    return args
 
 
 def main():
-    if "--cli" in sys.argv or "--export" in sys.argv:
-        run_cli()
+    args = parse_args()
+    if args.cli or args.export:
+        run_cli(args)
         return
 
-    run_gui()
+    run_gui(args)
 
 
-def run_gui():
+def run_gui(args):
     from PySide6.QtWidgets import QApplication
     from wlan_scan.gui.main_window import MainWindow
 
@@ -26,27 +42,33 @@ def run_gui():
     app.setApplicationName("WLAN Scan")
     app.setOrganizationName("WLANScan")
 
-    window = MainWindow()
+    window = MainWindow(replay=args.replay, record=args.record)
     window.show()
 
     sys.exit(app.exec())
 
 
-def run_cli():
+def run_cli(args):
     """Command-line scan mode."""
-    import json
+    from wlan_scan.backends import candidate_backends, open_first
+    from wlan_scan.recording import ScanRecorder
 
-    if sys.platform == "darwin":
-        from wlan_scan.macos_scanner import MacScanner
-        result = MacScanner().scan()
-    elif sys.platform == "win32":
-        from wlan_scan.scanner import scan
-        result = scan()
-    else:
-        print("Error: Wi-Fi scanning is only available on Windows or macOS.")
+    backend, _ = open_first(candidate_backends(replay=args.replay),
+                            debug=lambda m: print(m, file=sys.stderr))
+    if backend is None:
+        print("Error: no Wi-Fi scanner backend is available on this system "
+              "(Windows and macOS are supported; use --replay FILE elsewhere).")
         sys.exit(1)
+    try:
+        result = backend.scan()
+    finally:
+        backend.close()
+    if args.record:
+        rec = ScanRecorder(args.record)
+        rec.write(result)
+        rec.close()
 
-    if "--export" in sys.argv:
+    if args.export:
         import csv
         from datetime import datetime
         path = f"wifi_scan_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"

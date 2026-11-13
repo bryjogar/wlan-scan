@@ -268,3 +268,16 @@ def _oid_to_cipher(oid: bytes) -> str:
         return ""
     suite_type = oid[3]
     return CIPHER_NAMES_IE.get(suite_type, f"Cipher-{suite_type}")
+
+
+def apply_ies(bss) -> None:
+    """Fill a BSSEntry's IE-derived fields from ``bss.ies_raw`` (in place)."""
+    if not bss.ies_raw:
+        return
+    info = parse_information_elements(bss.ies_raw)
+    bss.security = info["security"]
+    bss.auth_algo = info["auth_algo"]
+    bss.cipher = info["cipher"]
+    bss.channel_width = info["channel_width"]
+    bss.station_count = info["station_count"]
+    bss.channel_utilization = info["channel_utilization"]
