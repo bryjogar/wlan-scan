@@ -323,6 +323,18 @@ class PwshScanner:
         self._interface_name: Optional[str] = None
         self._last_error: Optional[str] = None
         self._debug_callback: Optional[callable] = None
+        self._proc: Optional[subprocess.Popen] = None
+        self._stop_requested = False
+
+    def request_stop(self) -> None:
+        """Kill a bridge process that is still running (Stop / window close)."""
+        proc = self._proc
+        if proc is not None:
+            self._stop_requested = True
+            try:
+                proc.kill()
+            except Exception:
+                pass
 
     def set_debug_callback(self, callback: callable) -> None:
         self._debug_callback = callback
@@ -355,20 +367,30 @@ class PwshScanner:
         self._last_error = None
 
         try:
-            proc = subprocess.run(
+            self._proc = subprocess.Popen(
                 ["powershell.exe", "-NoProfile", "-Command", _BRIDGE_PS1],
-                capture_output=True,
-                text=True,
-                timeout=30,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                 creationflags=subprocess.CREATE_NO_WINDOW
                 if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0,
             )
         except FileNotFoundError:
             self._last_error = "PowerShell not found"
             return self._empty_result()
+        try:
+            stdout, stderr = self._proc.communicate(timeout=30)
         except subprocess.TimeoutExpired:
+            self._proc.kill()
+            self._proc.communicate()
             self._last_error = "PowerShell bridge timed out"
             return self._empty_result()
+        finally:
+            returncode = self._proc.returncode
+            self._proc = None
+        if self._stop_requested:
+            self._stop_requested = False
+            self._last_error = "stopped"
+            return self._empty_result()
+        proc = subprocess.CompletedProcess([], returncode, stdout or "", stderr or "")
 
         self._debug(f"pwsh exit={proc.returncode} stdout={len(proc.stdout)}B stderr={len(proc.stderr)}B")
 

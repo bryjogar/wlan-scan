@@ -60,7 +60,10 @@ class ScannerWorker(QThread):
         super().__init__(parent)
         self._running = False
         self._paused = False
-        self._interval = 3.0  # seconds between scans
+        self._single = False
+        self._wake = threading.Event()
+        self._backend = None
+        self._interval = 3.0  # seconds between scan starts
         self._replay = replay
         self._record = record
         self.backend_name = ""
@@ -90,6 +93,7 @@ class ScannerWorker(QThread):
 
     def run(self):
         self._running = True
+        self._wake.clear()
         self._connected = ""
         self._conn_stop = threading.Event()
         poller = None
@@ -103,37 +107,51 @@ class ScannerWorker(QThread):
         if backend is None:
             self.scan_error.emit("No Wi-Fi scanner backend is available on this system.")
 
+        self._backend = backend
         while self._running and backend is not None:
+            if self._paused and not self._single:
+                # Paused (Auto-scan off): idle until resume / scan_once / stop.
+                self._wake.wait()
+                self._wake.clear()
+                continue
+            self._single = False
             cycle_start = time.monotonic()
-            if not self._paused:
-                try:
-                    self.scan_started.emit()
-                    result = backend.scan()
-                    result.scan_duration = time.monotonic() - cycle_start
-                    result.backend = backend.name
-                    if poller is not None:
-                        result.connected_bssid = self._connected
-                    if recorder:
-                        recorder.write(result)
+            try:
+                self.scan_started.emit()
+                result = backend.scan()
+                result.scan_duration = time.monotonic() - cycle_start
+                result.backend = backend.name
+                if poller is not None:
+                    result.connected_bssid = self._connected
+                if recorder:
+                    recorder.write(result)
+                if self._running:
                     self.scan_complete.emit(result)
-                except Exception as e:
-                    self.scan_error.emit(f"{backend.name}: {e}")
-                    if fallbacks:
-                        self.debug_message.emit(
-                            f"{backend.name} failed — trying next backend")
-                        try:
-                            backend.close()
-                        except Exception:
-                            pass
-                        backend, fallbacks = self._activate(fallbacks)
-                        continue
+            except Exception as e:
+                if not self._running:
+                    break
+                self.scan_error.emit(f"{backend.name}: {e}")
+                if fallbacks:
+                    self.debug_message.emit(
+                        f"{backend.name} failed — trying next backend")
+                    try:
+                        backend.close()
+                    except Exception:
+                        pass
+                    backend, fallbacks = self._activate(fallbacks)
+                    self._backend = backend
+                    continue
             # Interval is start-to-start: a 3 s scan at a 5 s interval waits 2 s;
             # a scan longer than the interval is followed by the next at once.
-            remaining = self._interval - (time.monotonic() - cycle_start)
-            while self._running and remaining > 0:
-                time.sleep(min(0.1, remaining))
+            # Stop / pause / scan_once / interval changes wake the wait early.
+            while self._running and not self._paused and not self._single:
                 remaining = self._interval - (time.monotonic() - cycle_start)
+                if remaining <= 0:
+                    break
+                if self._wake.wait(remaining):
+                    self._wake.clear()
 
+        self._backend = None
         if backend is not None:
             try:
                 backend.close()
@@ -143,20 +161,44 @@ class ScannerWorker(QThread):
             recorder.close()
         self._conn_stop.set()
 
+    # ----- control (call from the GUI thread) -----
+
     def stop(self):
+        """Ask the thread to finish. Returns at once; wait() or the
+        ``finished`` signal tells you when it has."""
         self._running = False
+        self._wake.set()
         stop_event = getattr(self, "_conn_stop", None)
         if stop_event is not None:
             stop_event.set()
+        backend = self._backend
+        if backend is not None:
+            try:
+                backend.request_stop()  # interrupt a scan in progress
+            except Exception:
+                pass
+
+    @property
+    def paused(self) -> bool:
+        return self._paused
 
     def pause(self):
+        """Stop scanning continuously; the backend stays open."""
         self._paused = True
+        self._wake.set()
 
     def resume(self):
         self._paused = False
+        self._wake.set()
+
+    def scan_once(self):
+        """Run one scan now (works while paused or between interval scans)."""
+        self._single = True
+        self._wake.set()
 
     def set_interval(self, seconds: float):
         self._interval = max(0.25, seconds)
+        self._wake.set()
 
 
 class MainWindow(QMainWindow):
@@ -328,6 +370,8 @@ class MainWindow(QMainWindow):
 
         # Auto-scan toggle
         self._auto_scan_cb = QCheckBox("Auto-scan")
+        self._auto_scan_cb.setToolTip(
+            "On: scan every interval. Off: pause; the Scan button takes one scan per click.")
         self._auto_scan_cb.setChecked(True)
         self._auto_scan_cb.toggled.connect(self._on_auto_scan_toggled)
         toolbar.addWidget(self._auto_scan_cb)
@@ -475,6 +519,8 @@ class MainWindow(QMainWindow):
         self._worker.debug_message.connect(self._on_debug_message)
         self._worker.capability_detected.connect(self._on_capability_detected)
         self._worker.backend_changed.connect(self._on_backend_changed)
+        self._worker.finished.connect(self._on_worker_finished)
+        self._stopping = False
 
         # Check platform
         if sys.platform != "win32":
@@ -484,9 +530,8 @@ class MainWindow(QMainWindow):
                 0,
             )
 
-        # Start scanning if auto-scan is on
-        if self._auto_scan_cb.isChecked():
-            self._start_scanning()
+        # Scan on launch (Auto-scan off: one scan, then wait for clicks)
+        self._start_scanning()
 
     def _check_for_updates(self):
         """Check GitHub for a newer version — runs in background."""
@@ -523,27 +568,60 @@ class MainWindow(QMainWindow):
 
     # ── Actions ──
 
+    # Scan button states:
+    #   idle             "▶ Scan"        start the worker
+    #   running, auto    "⏸ Stop"        stop the worker
+    #   running, paused  "▶ Scan once"   one scan (Auto-scan off)
+    #   stopping         "Stopping…"     disabled until the thread finishes
     def _toggle_scan(self):
-        if hasattr(self, '_worker') and self._worker.isRunning():
-            self._worker.stop()
-            self._worker.wait(2000)
-            self._scan_btn.setText("▶  Scan")
-            self._scan_btn.setStyleSheet(
-                "QPushButton#scanButton { background-color: #3b82f6; }"
-            )
+        w = self._worker
+        if self._stopping:
+            return
+        if w.isRunning():
+            if w.paused:
+                w.scan_once()
+            else:
+                self._stopping = True
+                w.stop()
         else:
             self._start_scanning()
+        self._update_scan_button()
 
     def _start_scanning(self):
-        self._scan_btn.setText("⏸  Stop")
-        self._scan_btn.setStyleSheet(
-            "QPushButton#scanButton { background-color: #ef4444; }"
-            "QPushButton#scanButton:hover { background-color: #dc2626; }"
-        )
+        if self._worker.isRunning() or self._stopping:
+            return
         interval = float(self._interval_combo.currentText().replace("s", ""))
         self._worker.set_interval(interval)
+        if self._auto_scan_cb.isChecked():
+            self._worker.resume()
+        else:
+            self._worker.pause()
+            self._worker.scan_once()
         self._rate.reset()
         self._worker.start()
+        self._update_scan_button()
+
+    @Slot()
+    def _on_worker_finished(self):
+        self._stopping = False
+        self._update_scan_button()
+        if self._scan_count == 0 or self._status_scan.text().startswith("Scanning"):
+            self._status_scan.setText("Stopped")
+
+    def _update_scan_button(self):
+        w = self._worker
+        if self._stopping:
+            text, color, enabled = "…  Stopping", "#6b7280", False
+        elif not w.isRunning():
+            text, color, enabled = "▶  Scan", "#3b82f6", True
+        elif w.paused:
+            text, color, enabled = "▶  Scan once", "#3b82f6", True
+        else:
+            text, color, enabled = "⏸  Stop", "#ef4444", True
+        self._scan_btn.setText(text)
+        self._scan_btn.setEnabled(enabled)
+        self._scan_btn.setStyleSheet(
+            f"QPushButton#scanButton {{ background-color: {color}; }}")
 
     @Slot(str)
     def _on_backend_changed(self, name: str):
@@ -736,11 +814,17 @@ class MainWindow(QMainWindow):
                 )
 
     def _on_auto_scan_toggled(self, checked: bool):
-        if checked:
-            if not self._worker.isRunning():
-                self._start_scanning()
-        else:
-            pass  # keep scanning until user clicks stop
+        """Auto-scan on = scan every interval; off = pause, and the Scan
+        button takes one scan per click."""
+        if not hasattr(self, "_worker"):
+            return  # toggled during setup; _start_scanning reads the box
+        w = self._worker
+        if w.isRunning() and not self._stopping:
+            if checked:
+                w.resume()
+            else:
+                w.pause()
+        self._update_scan_button()
 
     def _on_interval_changed(self, text: str):
         interval = float(text.replace("s", ""))
@@ -914,6 +998,6 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         if hasattr(self, '_worker') and self._worker.isRunning():
-            self._worker.stop()
-            self._worker.wait(3000)
+            self._worker.stop()  # interrupts a scan in progress
+            self._worker.wait(5000)
         event.accept()

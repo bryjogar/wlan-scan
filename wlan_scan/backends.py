@@ -142,6 +142,10 @@ class PwshBackend(BaseBackend):
         self._scanner = PwshScanner()
         self._scanner.set_debug_callback(self.dbg)
 
+    def request_stop(self) -> None:
+        if self._scanner is not None:
+            self._scanner.request_stop()
+
     def scan(self) -> ScanResult:
         result = self._scanner.scan()
         if self._scanner.last_error:
