@@ -215,7 +215,9 @@ class MainWindow(QMainWindow):
         super().__init__()
         self._replay = replay
         self._record = record
-        self.setWindowTitle("WLAN Scan")
+        from ..version import __version__
+        self.setWindowTitle(f"WLAN Scan {__version__}" if not __version__.startswith("0.0.0")
+                            else "WLAN Scan (dev)")
         self.setWindowIcon(self._app_icon())
         self.setMinimumSize(1200, 800)
         self.resize(1400, 900)
@@ -539,13 +541,10 @@ class MainWindow(QMainWindow):
         from threading import Thread
         from ..updater import check_for_updates
 
-        try:
-            from ..version import __version_sha__
-        except ImportError:
-            __version_sha__ = "unknown"
+        from ..version import __version__
 
         def _run():
-            info = check_for_updates(__version_sha__)
+            info = check_for_updates(__version__)
             if info:
                 # Show update notification on main thread
                 QApplication.instance().postEvent(
@@ -560,8 +559,7 @@ class MainWindow(QMainWindow):
             info = event.update_info
             self._status_update.setText(
                 f'📦 <a href="{info.url}" style="color: #60a5fa; text-decoration: underline;">'
-                f'Update available: {info.current_sha[:7]} → {info.latest_sha[:7]}</a>'
-                f' — {info.message[:60]}…'
+                f'Update available: {info.current} → {info.latest}</a>'
             )
             self._status_update.show()
             return True

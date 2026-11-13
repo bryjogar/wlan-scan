@@ -6,6 +6,12 @@
 
 # -*- mode: python ; coding: utf-8 -*-
 
+import sys
+sys.path.insert(0, SPECPATH)
+from wlan_scan.version import __version__ as APP_VERSION
+from tools.versioning import bundle_version
+BUNDLE_VERSION = bundle_version(APP_VERSION)
+
 a = Analysis(
     ['main.py'],
     pathex=[],
@@ -92,8 +98,8 @@ app = BUNDLE(
     info_plist={
         'CFBundleName': 'WLAN Scan',
         'CFBundleDisplayName': 'WLAN Scan',
-        'CFBundleShortVersionString': '1.0.0',
-        'CFBundleVersion': '1.0.0',
+        'CFBundleShortVersionString': BUNDLE_VERSION,
+        'CFBundleVersion': BUNDLE_VERSION,
         'NSHighResolutionCapable': True,
         # Wi-Fi scanning on macOS is location-gated (10.15+); without this
         # key CoreWLAN returns no results.

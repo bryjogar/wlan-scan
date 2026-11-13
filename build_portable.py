@@ -9,32 +9,16 @@ Output:  dist/WLAN-Scan-Portable.exe  (~50-60 MB, ONE file, no _internal)
 import shutil
 import subprocess
 import sys
-from datetime import datetime
 from pathlib import Path
 
 PROJECT_DIR = Path(__file__).resolve().parent
 
 
 def embed_version():
-    sha = "unknown"
-    try:
-        result = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            capture_output=True, text=True, cwd=PROJECT_DIR,
-            timeout=5,
-        )
-        if result.returncode == 0:
-            sha = result.stdout.strip()
-    except Exception:
-        pass
-    version_file = PROJECT_DIR / "wlan_scan" / "version.py"
-    version_file.write_text(
-        f'# Auto-generated at build time by build_portable.py\n'
-        f'__version_sha__ = "{sha}"\n'
-        f'__build_time__ = "{datetime.now().isoformat()}"\n'
-    )
-    print(f"  Version SHA: {sha[:7]} ({sha})")
-    return sha
+    """Write the version (from the release tag) into wlan_scan/version.py."""
+    from tools.versioning import write_version_file
+
+    return write_version_file()
 
 
 def update_oui_snapshot():
