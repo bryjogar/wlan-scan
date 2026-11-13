@@ -36,7 +36,7 @@ Legend: ✅ done · 🔧 in progress · ⛔ blocked · ⬜ not started
 |---|---|---|
 | F1 Survey project file | ✅ | `wlan_scan/survey/project.py`: `.wlansurvey` zip = `project.json` (schema 1, name, site, created/modified, settings, floors with image/scale/boundary/AP markers, points) + `samples.jsonl` (one line per scan at a point) + `plans/<floor>.<ext>`. Atomic save, newer-schema refusal with a clear message, migration hook. Autosave sidecar `<file>.autosave` (untitled → user cache dir) + recovery check. The Save/Save As/Open actions and the 60 s autosave timer are in the Survey tab (F4). |
 | F2 Floor plan import | ✅ | `wlan_scan/survey/plan_import.py`: PNG/JPG stored as-is; PDF pages rendered with QtPdf (long side ≈ 3000 px, flattened on white); multi-page PDFs open a thumbnail page picker (`gui/survey_dialogs.py`). Multiple floors per project, each with its own image, scale, boundary, points (model from F1; floor switching UI in F4). Specs: QtPdf added to hidden imports and removed from the onefile build's excludes. |
-| F3 Scale calibration | ⬜ | |
+| F3 Scale calibration | ✅ | `survey/geometry.py`: `make_scale()` (validates), `PlanUnits` px↔ft/m (display unit can differ from the unit typed at calibration), pixel mode with "not calibrated" labels until a scale exists; convex hull / margin / point-in-polygon for boundaries. `gui/plan_view.py`: plan view with wheel zoom at cursor, drag/middle-drag pan, fit, and click tools (calibrate two-click line, point, walk, boundary, place AP). `CalibrateDialog` asks distance + unit (ft default). Wired into the tab in F4. |
 | F4 Survey tab | ⬜ | |
 | F5 Heatmap | ⬜ | |
 | F6 APs on the plan | ⬜ | |
