@@ -1,10 +1,9 @@
 """Detail panel — shows expanded information for a selected network."""
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QFont, QColor
+from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame, QScrollArea,
-    QSizePolicy,
 )
 
 from ..models import BSSEntry
@@ -88,7 +87,11 @@ class DetailPanel(QWidget):
         color = signal_color(rssi)
         label = signal_label(rssi)
 
-        signal_label_w = QLabel(f"{rssi} dBm · {label}")
+        approx = "≈ " if bss.is_estimated("rssi") else ""
+        signal_label_w = QLabel(f"{approx}{rssi} dBm · {label}")
+        if approx:
+            signal_label_w.setToolTip("Estimated: netsh reports signal quality in %, "
+                                      "converted to dBm (0 % = -100, 100 % = -50).")
         signal_label_w.setFont(QFont("Segoe UI", 14, QFont.Weight.Bold))
         signal_label_w.setStyleSheet(f"color: {color};")
         signal_label_w.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -98,8 +101,8 @@ class DetailPanel(QWidget):
         bar = QFrame()
         bar.setFixedHeight(8)
         bar.setStyleSheet(
-            f"background-color: #252836; border-radius: 4px; "
-            f"border: none;"
+            "background-color: #252836; border-radius: 4px; "
+            "border: none;"
         )
         bar_layout = QHBoxLayout(bar)
         bar_layout.setContentsMargins(0, 0, 0, 0)
@@ -128,7 +131,8 @@ class DetailPanel(QWidget):
             ("Modes", bss.supported_modes or _modes_from_phy(bss.phy_type, bss.band), None),
             ("Band", bss.band, band_color),
             ("Channel", str(bss.channel), None),
-            ("Channel Width", f"{bss.channel_width} MHz" if bss.channel_width > 0 else "—", None),
+            ("Channel Width", (f"{bss.channel_width} MHz" + (" (estimated)" if bss.is_estimated("channel_width") else ""))
+             if bss.channel_width > 0 else "—", None),
             ("PHY Mode", bss.phy_type, None),
             ("Security", bss.security, security_color(bss.security)),
             ("PMF (802.11w)", bss.pmf or "—", None),

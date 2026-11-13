@@ -8,7 +8,7 @@ SSID labels are drawn inside rects when tall enough (strong signals) or
 with collision-avoided placement below for weaker signals.
 """
 
-from PySide6.QtCore import Qt, QRectF, QPointF
+from PySide6.QtCore import Qt, QRectF
 from PySide6.QtGui import (
     QPainter, QColor, QPen, QBrush, QFont, QLinearGradient, QPainterPath,
 )

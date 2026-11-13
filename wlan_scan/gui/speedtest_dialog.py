@@ -18,7 +18,7 @@ from PySide6.QtGui import QFont, QColor, QTextCursor, QDesktopServices
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QPlainTextEdit, QProgressBar, QMessageBox,
-    QGroupBox, QGridLayout, QFrame, QApplication,
+    QGroupBox, QGridLayout,
 )
 from PySide6.QtCore import QUrl
 

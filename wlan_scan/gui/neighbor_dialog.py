@@ -12,16 +12,14 @@ import ipaddress
 import re
 import subprocess
 import sys
-import threading
-import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from PySide6.QtCore import Qt, Signal, QThread
-from PySide6.QtGui import QFont, QColor, QBrush
+from PySide6.QtGui import QFont, QColor
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QTableWidget, QTableWidgetItem, QHeaderView,
-    QMessageBox, QProgressBar, QFrame, QAbstractItemView,
+    QMessageBox, QProgressBar, QAbstractItemView,
 )
 
 from ..vendors import lookup_vendor

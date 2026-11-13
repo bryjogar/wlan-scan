@@ -1,16 +1,15 @@
 """Real-time signal strength graph using QtCharts."""
 
 import time
-from collections import defaultdict
 from dataclasses import dataclass, field
 
 from PySide6.QtCore import Qt, QPointF, QTimer
 from PySide6.QtGui import QColor, QPen, QFont, QPainter
-from PySide6.QtCharts import QChart, QChartView, QLineSeries, QValueAxis, QDateTimeAxis
+from PySide6.QtCharts import QChart, QChartView, QLineSeries, QValueAxis
 from PySide6.QtWidgets import QWidget, QVBoxLayout
 
-from ..models import BSSEntry, Network
-from .styles import signal_color, BAND_COLORS
+from ..models import Network
+from .styles import signal_color
 
 
 @dataclass

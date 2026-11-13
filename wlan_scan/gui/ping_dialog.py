@@ -7,13 +7,12 @@ and shows real-time min/avg/max latency plus packet loss.
 import re
 import subprocess
 import sys
-import threading
 
 from PySide6.QtCore import Qt, Signal, QThread
 from PySide6.QtGui import QFont, QColor, QTextCursor
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
-    QPushButton, QPlainTextEdit, QFrame, QMessageBox,
+    QPushButton, QPlainTextEdit, QMessageBox,
 )
 
 from .styles import DARK_THEME
@@ -138,14 +137,8 @@ class PingWorker(QThread):
                     self._lost += 1
                 elif _PING_STATS_LINE_RE.search(line):
                     kind = "stats"
-                    sm = _PING_STATS_LINE_RE.search(line)
-                    if sm:
-                        sent = int(sm.group(1))
-                        recv = int(sm.group(2))
-                        lost = int(sm.group(3))
-                        loss_pct = int(sm.group(4))
-                        # Continue reading next lines for min/max/avg
-                        continue
+                    # The OS summary line is skipped: we count replies ourselves.
+                    continue
                 elif _PING_MIN_RE.search(line) or _PING_MAX_RE.search(line) or _PING_AVG_RE.search(line):
                     # Skip individual stat lines — we compute our own
                     kind = "info"

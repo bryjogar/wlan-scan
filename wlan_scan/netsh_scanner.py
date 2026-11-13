@@ -1,9 +1,22 @@
-"""Wi-Fi scanner using `netsh wlan show networks mode=bssid`.
+"""Wi-Fi scanner using `netsh wlan show networks mode=bssid` (last-resort fallback).
 
-Reliable fallback when wlanapi ctypes fails (ARM64, Qualcomm drivers, etc.).
-Parses the text output from netsh into the same BSSEntry/Network/ScanResult
-types used by the ctypes scanner.
+Used when neither wlanapi (ctypes) nor the PowerShell bridge works. netsh
+gives no raw IEs, so several values are ESTIMATES and flagged as such in
+``BSSEntry.estimated``:
+
+* RSSI: netsh prints signal *quality* in percent. Windows defines quality
+  linearly from -100 dBm (0 %) to -50 dBm (100 %), so dBm = pct / 2 - 100.
+* Channel width: guessed from radio type and band.
+
+Parsing expects English output (labels are localised on other Windows
+languages; unknown lines are ignored).
+
+v1 crashed on the first BSSID (``_channel_to_freq`` was undefined) and
+emitted each BSS at its Channel line, before that BSS's rates, BSS-load
+and (on Windows 11) Band lines.
 """
+
+from __future__ import annotations
 
 import re
 import subprocess
@@ -11,12 +24,15 @@ import sys
 from datetime import datetime
 from typing import Optional
 
-from .models import BSSEntry, Network, ScanResult
+from .channels import BAND_24, BAND_5, BAND_6, band_from_channel, channel_to_freq, \
+    standard_center_channel
+from .models import BSSEntry, ScanResult, group_networks
 from .vendors import lookup_vendor
+
+ESTIMATED_FIELDS = "rssi,channel_width"
 
 
 def _run_netsh() -> str:
-    """Run netsh and return stdout as string."""
     try:
         result = subprocess.run(
             ["netsh", "wlan", "show", "networks", "mode=bssid"],
@@ -30,330 +46,182 @@ def _run_netsh() -> str:
         raise RuntimeError(f"netsh wlan failed: {e}")
 
 
-# Matches the interface name line
-_RE_INTERFACE = re.compile(r"^\s*Interface name\s*:\s*(.+)$", re.IGNORECASE)
-
-# Matches SSID line (start of a network block)
-# Uses .* not .+ to match empty/hidden SSIDs
-_RE_SSID = re.compile(r"^\s*SSID\s+\d+\s*:\s*(.*)$", re.IGNORECASE)
-
-# Matches BSSID line
-_RE_BSSID = re.compile(r"^\s*BSSID\s+\d+\s*:\s*([0-9a-f]{2}:[0-9a-f]{2}:[0-9a-f]{2}:[0-9a-f]{2}:[0-9a-f]{2}:[0-9a-f]{2})$", re.IGNORECASE)
-
-# Field matchers (name: value pairs)
-_RE_NETWORK_TYPE = re.compile(r"^\s*Network type\s*:\s*(.+)$", re.IGNORECASE)
-_RE_AUTH = re.compile(r"^\s*Authentication\s*:\s*(.+)$", re.IGNORECASE)
-_RE_ENCRYPTION = re.compile(r"^\s*Encryption\s*:\s*(.+)$", re.IGNORECASE)
-_RE_SIGNAL = re.compile(r"^\s*Signal\s*:\s*(\d+)%?$", re.IGNORECASE)
-_RE_RADIO = re.compile(r"^\s*Radio type\s*:\s*(.+)$", re.IGNORECASE)
-_RE_CHANNEL = re.compile(r"^\s*Channel\s*:\s*(\d+)$", re.IGNORECASE)
-_RE_BASIC_RATES = re.compile(r"^\s*Basic rates\s*\(Mbps\)\s*:\s*(.+)$", re.IGNORECASE)
-_RE_OTHER_RATES = re.compile(r"^\s*Other rates\s*\(Mbps\)\s*:\s*(.+)$", re.IGNORECASE)
-_RE_BAND = re.compile(r"^\s*Band\s*:\s*(.+)$", re.IGNORECASE)
-_RE_BEACON = re.compile(r"^\s*Beacon interval\s*:\s*(\d+)$", re.IGNORECASE)
-_RE_PHY = re.compile(r"^\s*Phy type\s*:\s*(.+)$", re.IGNORECASE)
-_RE_VENDOR = re.compile(r"^\s*Vendor\s*:\s*(.+)$", re.IGNORECASE)
+_RE_KV = re.compile(r"^\s*([^:]+?)\s*:\s*(.*?)\s*$")
+_RE_SSID = re.compile(r"^SSID\s+\d+$", re.IGNORECASE)
+_RE_BSSID = re.compile(r"^BSSID\s+\d+$", re.IGNORECASE)
+_RE_MAC = re.compile(r"^[0-9a-f]{2}(?::[0-9a-f]{2}){5}$", re.IGNORECASE)
 
 
-def _signal_to_rssi(percent: int) -> int:
-    """Convert signal percentage (0-100) to approximate RSSI in dBm."""
-    # Rough mapping: 100% ≈ -30 dBm, 0% ≈ -90 dBm
-    if percent <= 0:
-        return -90
-    if percent >= 100:
-        return -30
-    return -90 + int(percent * 0.6)
+def signal_to_rssi(percent: int) -> int:
+    """Windows signal quality (0-100 %) → dBm: linear -100 dBm … -50 dBm."""
+    percent = max(0, min(100, percent))
+    return int(round(percent / 2 - 100))
 
 
 def _radio_to_phy(radio: str) -> str:
-    """Map netsh radio type to PHY type name."""
-    radio = radio.strip().lower()
-    if "802.11be" in radio or "wi-fi 7" in radio:
-        return "802.11be (EHT)"
-    if "802.11ax" in radio or "wi-fi 6" in radio:
-        return "802.11ax (HE)"
-    if "802.11ac" in radio:
-        return "802.11ac (VHT)"
-    if "802.11n" in radio:
-        return "802.11n (HT)"
-    if "802.11g" in radio:
-        return "802.11g"
-    if "802.11b" in radio:
-        return "HRDSSS (802.11b)"
-    if "802.11a" in radio:
-        return "802.11a"
-    return radio
+    r = radio.strip().lower()
+    for key, phy in (("802.11be", "802.11be (EHT)"), ("802.11ax", "802.11ax (HE)"),
+                     ("802.11ac", "802.11ac (VHT)"), ("802.11n", "802.11n (HT)"),
+                     ("802.11g", "802.11g (ERP)"), ("802.11b", "802.11b (HR-DSSS)"),
+                     ("802.11a", "802.11a (OFDM)")):
+        if key in r:
+            return phy
+    return radio.strip() or "Unknown"
 
 
-def _channel_to_band(channel: int) -> str:
-    """Map channel number to band name."""
-    if 1 <= channel <= 14:
-        return "2.4 GHz"
-    if 36 <= channel <= 177:
-        return "5 GHz"
-    if channel >= 1:  # 6 GHz channels are typically 1-233 in the new scheme
-        # More specific check
-        if 36 <= channel <= 177:
-            return "5 GHz"
-        if channel >= 183:
-            return "6 GHz"
-    return "Unknown"
+def _generation(phy: str, band: str) -> str:
+    if "be" in phy:
+        return "Wi-Fi 7"
+    if "ax" in phy:
+        return "Wi-Fi 6E" if band == BAND_6 else "Wi-Fi 6"
+    if "ac" in phy:
+        return "Wi-Fi 5"
+    if "11n" in phy:
+        return "Wi-Fi 4"
+    return "Legacy"
 
 
-def _estimate_channel_width(phy_type: str, band: str) -> int:
-    """Estimate channel width from PHY type and band.
-
-    Netsh doesn't report channel width; real widths come from 802.11
-    HT/VHT/HE/EHT Operation IEs only accessible via wlanapi ctypes.
-    These are reasonable defaults for the most common deployments.
-
-    Returns estimated width in MHz, or 0 if unknown.
-    """
-    p = phy_type.lower()
-
-    # WiFi 7 (802.11be / EHT)
-    if "be" in p or "eht" in p:
-        if "6 ghz" in band or "6GHz" in band:
-            return 320
-        return 160
-
-    # WiFi 6/6E (802.11ax / HE)
-    if "ax" in p or "he" in p:
-        if "6 ghz" in band or "6GHz" in band:
-            return 160
-        if "5 ghz" in band or "5GHz" in band:
-            return 80
-        return 20  # 2.4 GHz ax is usually 20 MHz
-
-    # WiFi 5 (802.11ac / VHT)
-    if "ac" in p or "vht" in p:
+def estimate_channel_width(phy: str, band: str) -> int:
+    """Typical deployment width for a radio type on a band (estimate)."""
+    p = phy.lower()
+    if "be" in p:
+        return 320 if band == BAND_6 else (160 if band == BAND_5 else 20)
+    if "ax" in p:
+        return {BAND_6: 160, BAND_5: 80}.get(band, 20)
+    if "ac" in p:
         return 80
-
-    # WiFi 4 (802.11n / HT) — 40 MHz on 5 GHz, 20 MHz on 2.4
-    if "n" in p or "ht" in p:
-        if "5 ghz" in band or "5GHz" in band:
-            return 40
-        return 20
-
-    # Legacy (802.11a/b/g) — always 20 MHz
+    if "11n" in p:
+        return 40 if band == BAND_5 else 20
     return 20
-    """Approximate center frequency in kHz from channel + band."""
-    if band == "2.4 GHz":
-        return int((2407 + channel * 5) * 1000)
-    elif band == "5 GHz":
-        return int((5000 + channel * 5) * 1000)
-    elif band == "6 GHz":
-        return int((5950 + (channel - 1) * 5) * 1000)
-    return 0
 
 
-def _parse_max_rate(rates_str: str) -> float:
-    """Parse a space-separated rate list and return max in Mbps."""
-    try:
-        parts = rates_str.strip().split()
-        nums = [float(p.replace(",", ".")) for p in parts if p]
-        return max(nums) if nums else 0.0
-    except (ValueError, IndexError):
-        return 0.0
+def _band_label(text: str, channel: int) -> str:
+    t = text.replace(" ", "").lower()
+    if t.startswith("2.4"):
+        return BAND_24
+    if t.startswith("5"):
+        return BAND_5
+    if t.startswith("6"):
+        return BAND_6
+    return band_from_channel(channel)
 
 
-def _normalize_security(auth: str, encryption: str) -> tuple[str, str, str]:
-    """Normalize auth/encryption strings into security, auth_algo, cipher."""
+def normalize_security(auth: str, encryption: str) -> tuple[str, str, str]:
+    """netsh Authentication/Encryption → (security, auth_algo, cipher)."""
     a = auth.strip().lower()
-    e = encryption.strip().lower()
-
+    e = encryption.strip()
+    cipher = "" if e.lower() == "none" else e.upper()
+    if "owe" in a:
+        return "OWE (Enhanced Open)", "OWE", cipher
+    if "wpa3" in a and "enterprise" in a:
+        return "WPA3-Enterprise", auth.strip(), cipher
     if "wpa3" in a or "sae" in a:
-        return "WPA3-SAE", "WPA3-SAE", e.upper()
+        return "WPA3", "SAE", cipher
     if "wpa2" in a and "enterprise" in a:
-        return "WPA2-Enterprise", "WPA2-Enterprise", e.upper()
+        return "WPA2-Enterprise", "802.1X", cipher
     if "wpa2" in a:
-        return "WPA2 PSK (WPA2)", "WPA2-PSK", e.upper()
+        return "WPA2", "PSK", cipher
     if "wpa" in a and "enterprise" in a:
-        return "WPA-Enterprise", "WPA-Enterprise", e.upper()
+        return "WPA-Enterprise", "802.1X", cipher
     if "wpa" in a:
-        return "WPA PSK (WPA)", "WPA-PSK", e.upper()
-    if "wep" in a:
-        return "WEP", "WEP", e.upper()
-    if "open" in a or "none" in a:
-        return "Open", "Open", "None"
+        return "WPA", "PSK", cipher
+    if "wep" in a or e.lower() == "wep":
+        return "WEP", "WEP", "WEP"
+    if "open" in a:
+        return ("WEP", "Open", "WEP") if e.lower() == "wep" else ("Open", "Open", "")
+    return auth.strip() or "Unknown", auth.strip(), cipher
 
-    return a, a, e
+
+def _finish(bss: dict, net: dict, ts: datetime) -> Optional[BSSEntry]:
+    if not bss.get("bssid"):
+        return None
+    channel = int(bss.get("channel") or 0)
+    band = _band_label(bss.get("band", ""), channel)
+    phy = _radio_to_phy(bss.get("radio", ""))
+    width = estimate_channel_width(phy, band)
+    security, auth, cipher = normalize_security(net.get("auth", ""), net.get("enc", ""))
+    util = bss.get("util")
+    return BSSEntry(
+        bssid=bss["bssid"],
+        ssid=net.get("ssid", ""),
+        rssi=signal_to_rssi(int(bss.get("signal") or 0)),
+        channel=channel,
+        channel_width=width,
+        center_channel=standard_center_channel(channel, width, band),
+        band=band,
+        center_frequency=channel_to_freq(channel, band),
+        phy_type=phy,
+        security=security,
+        auth_algo=auth,
+        cipher=cipher,
+        vendor=lookup_vendor(bss["bssid"]),
+        wifi_generation=_generation(phy, band),
+        station_count=int(bss.get("stations") or 0),
+        channel_utilization=float(util) if util is not None else 0.0,
+        max_rate=0.0,  # netsh lists only legacy rates (<= 54 Mbps): not a PHY max
+        estimated=ESTIMATED_FIELDS,
+        timestamp=ts,
+    )
+
+
+def parse_netsh_output(output: str, ts: Optional[datetime] = None) -> ScanResult:
+    """Parse `netsh wlan show networks mode=bssid` (English) into a ScanResult."""
+    ts = ts or datetime.now()
+    result = ScanResult(timestamp=ts, interface_guid="netsh")
+    entries: list[BSSEntry] = []
+    net: dict = {}
+    bss: dict = {}
+
+    def flush_bss():
+        nonlocal bss
+        e = _finish(bss, net, ts)
+        if e is not None:
+            entries.append(e)
+        bss = {}
+
+    for raw in output.splitlines():
+        m = _RE_KV.match(raw)
+        if not m:
+            continue
+        key, value = m.group(1).strip(), m.group(2).strip()
+        k = key.lower()
+        if k == "interface name":
+            result.interface_name = value
+        elif _RE_SSID.match(key):
+            flush_bss()
+            net = {"ssid": value}
+        elif _RE_BSSID.match(key) and _RE_MAC.match(value):
+            flush_bss()
+            bss = {"bssid": value}
+        elif k == "authentication":
+            net["auth"] = value
+        elif k == "encryption":
+            net["enc"] = value
+        elif not bss:
+            continue
+        elif k == "signal":
+            bss["signal"] = re.sub(r"\D", "", value) or "0"
+        elif k == "radio type":
+            bss["radio"] = value
+        elif k == "band":
+            bss["band"] = value
+        elif k == "channel":
+            bss["channel"] = re.sub(r"\D", "", value) or "0"
+        elif k == "connected stations":
+            bss["stations"] = re.sub(r"\D", "", value) or "0"
+        elif k == "channel utilization":
+            pm = re.search(r"\((\d+)\s*%\)", value)
+            if pm:
+                bss["util"] = pm.group(1)
+            elif value.isdigit():  # raw 0-255 only
+                bss["util"] = round(int(value) / 255 * 100, 1)
+    flush_bss()
+    result.networks = group_networks(entries)
+    return result
 
 
 def scan() -> ScanResult:
-    """Run netsh wlan show networks mode=bssid and parse output."""
+    """Run netsh and parse its output."""
     if sys.platform != "win32":
         raise OSError("netsh wlan is only available on Windows.")
-
-    output = _run_netsh()
-
-    scan = ScanResult(
-        timestamp=datetime.now(),
-        interface_name="",  # populated from output
-        interface_guid="netsh",  # netsh doesn't expose GUID
-    )
-
-    lines = output.splitlines()
-
-    # Track state
-    current_ssid: Optional[str] = None
-    current_auth = ""
-    current_encryption = ""
-    current_network_type = ""
-    current_band = ""
-    current_phy = ""
-    current_beacon = 0
-    current_basic_rates = ""
-    current_other_rates = ""
-    current_vendor = ""
-
-    networks_by_ssid: dict[str, Network] = {}
-    bss_count = 0
-
-    for raw_line in lines:
-        line = raw_line.rstrip()
-        if not line.strip():
-            continue
-
-        # Interface name
-        m = _RE_INTERFACE.match(line)
-        if m:
-            scan.interface_name = m.group(1).strip()
-            continue
-
-        # New SSID block
-        m = _RE_SSID.match(line)
-        if m:
-            current_ssid = m.group(1).strip()
-            # Reset per-SSID state
-            current_auth = ""
-            current_encryption = ""
-            current_network_type = ""
-            current_band = ""
-            current_phy = ""
-            current_beacon = 0
-            current_basic_rates = ""
-            current_other_rates = ""
-            current_vendor = ""
-            continue
-
-        # BSSID block within current SSID
-        m = _RE_BSSID.match(line)
-        if m:
-            bssid_raw = m.group(1)
-            bssid = bssid_raw.lower()
-            # The next several lines will be this BSSID's attributes
-            # We'll collect them and emit a BSSEntry when we hit
-            # the next BSSID or SSID line
-            continue
-
-        # Collect attributes (apply to current SSID or current BSSID)
-        m = _RE_NETWORK_TYPE.match(line)
-        if m:
-            current_network_type = m.group(1).strip()
-            continue
-
-        m = _RE_AUTH.match(line)
-        if m:
-            current_auth = m.group(1).strip()
-            continue
-
-        m = _RE_ENCRYPTION.match(line)
-        if m:
-            current_encryption = m.group(1).strip()
-            continue
-
-        m = _RE_SIGNAL.match(line)
-        if m:
-            signal_pct = int(m.group(1))
-            rssi = _signal_to_rssi(signal_pct)
-            continue
-
-        m = _RE_RADIO.match(line)
-        if m:
-            current_phy = _radio_to_phy(m.group(1).strip())
-            continue
-
-        m = _RE_CHANNEL.match(line)
-        if m:
-            channel = int(m.group(1))
-            band = _channel_to_band(channel)
-            current_band = band
-            freq = _channel_to_freq(channel, band)
-
-            # We have enough to create a BSSEntry at this point
-            # (channel comes last in a BSSID block)
-            security, auth_algo, cipher = _normalize_security(
-                current_auth, current_encryption)
-
-            # netsh only lists legacy rates (max 54 Mbps): not a PHY max, so blank.
-            max_rate = 0.0
-
-            vendor = lookup_vendor(bssid)
-
-            entry = BSSEntry(
-                bssid=bssid,
-                ssid=current_ssid or "",
-                rssi=rssi,
-                channel=channel,
-                channel_width=_estimate_channel_width(
-                    current_phy, band),  # estimated
-                band=band,
-                center_frequency=freq,
-                phy_type=current_phy or "Unknown",
-                security=security,
-                auth_algo=auth_algo,
-                cipher=cipher,
-                vendor=vendor,
-                station_count=0,
-                channel_utilization=0.0,
-                beacon_period=current_beacon,
-                max_rate=max_rate,
-                ies_raw=b"",
-                timestamp=datetime.now(),
-            )
-
-            ssid_key = current_ssid or "<Hidden>"
-            if ssid_key not in networks_by_ssid:
-                networks_by_ssid[ssid_key] = Network(ssid=current_ssid)
-            networks_by_ssid[ssid_key].bss_list.append(entry)
-            bss_count += 1
-            continue
-
-        m = _RE_BASIC_RATES.match(line)
-        if m:
-            current_basic_rates = m.group(1).strip()
-            continue
-
-        m = _RE_OTHER_RATES.match(line)
-        if m:
-            current_other_rates = m.group(1).strip()
-            continue
-
-        m = _RE_BAND.match(line)
-        if m:
-            current_band = m.group(1).strip()
-            continue
-
-        m = _RE_BEACON.match(line)
-        if m:
-            try:
-                current_beacon = int(m.group(1))
-            except ValueError:
-                pass
-            continue
-
-    # Refresh summaries
-    for net in networks_by_ssid.values():
-        net.refresh_summary()
-
-    def sort_key(n: Network) -> tuple:
-        return (n.ssid == "<Hidden>", -n.best_rssi)
-
-    scan.networks = sorted(networks_by_ssid.values(), key=sort_key)
-    return scan
-
-
-def scan_networks() -> list[Network]:
-    """Return just the network list (convenience)."""
-    return scan().networks
+    return parse_netsh_output(_run_netsh())

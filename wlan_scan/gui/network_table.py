@@ -1,7 +1,7 @@
 """Network table widget — sortable, color-coded list of all discovered networks."""
 
-from PySide6.QtCore import Qt, QTimer, Signal, QPoint
-from PySide6.QtGui import QColor, QFont, QBrush, QAction
+from PySide6.QtCore import Qt, Signal, QPoint
+from PySide6.QtGui import QColor, QFont, QBrush
 from PySide6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
     QWidget, QVBoxLayout, QMenu,
@@ -177,7 +177,7 @@ class NetworkTableWidget(QWidget):
                     None,
                 ),
                 (bssid, None),
-                (str(bss.rssi), rssi_color),
+                (("≈" if bss.is_estimated("rssi") else "") + str(bss.rssi), rssi_color),
                 (signal_label(bss.rssi), rssi_color),
                 (bss.band, None),
                 (str(bss.channel), None),

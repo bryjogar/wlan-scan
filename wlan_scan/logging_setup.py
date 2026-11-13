@@ -1,18 +1,26 @@
-"""File-based logging for WLAN Scan.
+"""File logging for WLAN Scan.
 
-Writes all scanner activity and errors to disk so they survive
-GUI restarts and status-bar auto-clears.
+One file per day, ``wlanscan-YYYY-MM-DD.log``, in the platform log dir;
+files older than ``KEEP_DAYS`` are deleted at start-up (including the
+``wifiexplorer-*.log`` files v1 wrote and never pruned).
+
+Modules log through ``get_logger()`` or ``logging.getLogger("wlanscan.<name>")``.
 """
 
 import logging
 import os
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
+LOGGER_NAME = "wlanscan"
+KEEP_DAYS = 14
+_PATTERNS = ("wlanscan-*.log", "wifiexplorer-*.log")
+
 
 def log_dir() -> Path:
-    """Get the log directory (platform-appropriate)."""
+    """Platform log directory."""
     if sys.platform == "win32":
         base = Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming"))
         return base / "WLANScan" / "logs"
@@ -22,30 +30,42 @@ def log_dir() -> Path:
     return base / "WLANScan" / "logs"
 
 
+def prune_logs(directory: Path, keep_days: int = KEEP_DAYS, now: float | None = None) -> int:
+    """Delete log files older than ``keep_days``. Returns how many were removed."""
+    cutoff = (now if now is not None else time.time()) - keep_days * 86400
+    removed = 0
+    for pattern in _PATTERNS:
+        for p in directory.glob(pattern):
+            try:
+                if p.stat().st_mtime < cutoff:
+                    p.unlink()
+                    removed += 1
+            except OSError:
+                pass
+    return removed
+
+
 def setup_logging() -> logging.Logger:
-    """Configure and return a logger that writes to file + console."""
-    log_dir_ = log_dir()
-    log_dir_.mkdir(parents=True, exist_ok=True)
-
-    logger = logging.getLogger("wifiexplorer")
-    logger.setLevel(logging.DEBUG)
-
-    # Avoid duplicate handlers
+    """Configure (once) and return the app logger: file (DEBUG) + stderr (WARNING)."""
+    logger = logging.getLogger(LOGGER_NAME)
     if logger.handlers:
         return logger
+    logger.setLevel(logging.DEBUG)
 
-    # File handler (rotating by date in name)
-    today = datetime.now().strftime("%Y-%m-%d")
-    log_path = log_dir_ / f"wifiexplorer-{today}.log"
-    fh = logging.FileHandler(str(log_path), encoding="utf-8")
-    fh.setLevel(logging.DEBUG)
-    fh.setFormatter(logging.Formatter(
-        "%(asctime)s [%(levelname)s] %(message)s",
-        datefmt="%H:%M:%S",
-    ))
-    logger.addHandler(fh)
+    directory = log_dir()
+    log_path = None
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+        prune_logs(directory)
+        log_path = directory / f"{LOGGER_NAME}-{datetime.now():%Y-%m-%d}.log"
+        fh = logging.FileHandler(str(log_path), encoding="utf-8")
+        fh.setLevel(logging.DEBUG)
+        fh.setFormatter(logging.Formatter(
+            "%(asctime)s [%(levelname)s] %(name)s: %(message)s", datefmt="%H:%M:%S"))
+        logger.addHandler(fh)
+    except OSError:
+        pass  # read-only home etc.: keep going with stderr only
 
-    # Also log to stderr so it appears in console if launched from terminal
     sh = logging.StreamHandler()
     sh.setLevel(logging.WARNING)
     sh.setFormatter(logging.Formatter("[%(levelname)s] %(message)s"))
@@ -55,6 +75,7 @@ def setup_logging() -> logging.Logger:
     return logger
 
 
-def get_logger() -> logging.Logger:
-    """Get (or create) the WLAN Scan logger."""
-    return setup_logging()
+def get_logger(name: str = "") -> logging.Logger:
+    """The app logger, or a child (``wlanscan.<name>``)."""
+    setup_logging()
+    return logging.getLogger(f"{LOGGER_NAME}.{name}" if name else LOGGER_NAME)

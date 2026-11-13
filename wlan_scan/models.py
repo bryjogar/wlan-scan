@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Iterable, Optional
+from typing import Iterable
 
 
 @dataclass
@@ -31,8 +31,12 @@ class BSSEntry:
     beacon_period: int = 0
     max_rate: float = 0.0  # Mbps: highest PHY rate the AP advertises (0 = unknown)
     spatial_streams: int = 0  # AP's spatial streams from HT/VHT/HE/EHT caps (0 = unknown)
+    estimated: str = ""  # comma-separated fields that are estimates, e.g. "rssi,channel_width"
     ies_raw: bytes = field(default_factory=bytes, repr=False)
     timestamp: datetime = field(default_factory=datetime.now)
+
+    def is_estimated(self, field_name: str) -> bool:
+        return field_name in self.estimated.split(",")
 
     def __post_init__(self):
         # One canonical form everywhere (scanners disagreed on case, so the

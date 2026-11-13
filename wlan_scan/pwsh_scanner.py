@@ -7,14 +7,16 @@ The CLR interop works fine — proven by test_bss_bridge.py.
 Returns the same ScanResult model as scanner.py for drop-in replacement.
 """
 
-import subprocess
 import json
-import sys
+import logging
+import subprocess
 from typing import Optional
 
 from .bss import build_bss_entry
 from .models import BSSEntry, ScanResult, group_networks
 from .vendors import lookup_vendor
+
+_log = logging.getLogger("wlanscan.pwsh")
 
 
 # ── PowerShell bridge script (known-working from test_bss_bridge.py) ──
@@ -342,7 +344,8 @@ class PwshScanner:
     def _debug(self, msg: str) -> None:
         if self._debug_callback:
             self._debug_callback(msg)
-        print(f"[pwsh_debug] {msg}", file=sys.stderr, flush=True)
+        else:
+            _log.debug(msg)
 
     @property
     def interface_name(self) -> Optional[str]:
@@ -413,8 +416,8 @@ class PwshScanner:
                     break
             data = json.loads(raw_stdout)
         except json.JSONDecodeError as e:
-            print(f"[pwsh_debug] JSON parse FAILED: {e}", file=sys.stderr, flush=True)
-            print(f"[pwsh_debug] First 500 chars: {proc.stdout[:500]}", file=sys.stderr, flush=True)
+            _log.warning(f"PowerShell bridge JSON parse failed: {e}; "
+                         f"first 500 chars: {proc.stdout[:500]!r}")
             self._last_error = f"JSON parse error: {proc.stdout[:200]}"
             if proc.stderr:
                 self._last_error += f" | stderr: {proc.stderr.strip()[:200]}"

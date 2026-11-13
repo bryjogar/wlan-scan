@@ -6,7 +6,7 @@ Useful for walking a site and finding APs by ear.
 
 import sys
 import time
-from PySide6.QtCore import Qt, QObject, QTimer, Signal, Slot
+from PySide6.QtCore import Qt, QObject, QTimer, Signal
 
 
 class BSSIDTracker(QObject):

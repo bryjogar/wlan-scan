@@ -23,7 +23,7 @@ import json
 import threading
 from datetime import datetime
 from pathlib import Path
-from typing import IO, Iterable, Optional
+from typing import IO, Optional
 
 from .backends import BaseBackend, DebugFn
 from .models import BSSEntry, ScanResult, group_networks

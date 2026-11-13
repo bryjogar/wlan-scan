@@ -6,12 +6,12 @@ import time
 import os
 from datetime import datetime
 
-from PySide6.QtCore import Qt, QTimer, Signal, Slot, QThread, QSize, QEvent
-from PySide6.QtGui import QFont, QAction, QKeySequence, QColor, QIcon
+from PySide6.QtCore import Qt, Signal, Slot, QThread, QSize, QEvent
+from PySide6.QtGui import QFont, QAction, QKeySequence, QIcon
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSplitter,
-    QPushButton, QToolBar, QStatusBar, QLabel, QComboBox, QCheckBox,
-    QTabWidget, QMessageBox, QFileDialog, QLineEdit, QApplication, QFrame,
+    QPushButton, QStatusBar, QLabel, QComboBox, QCheckBox, QMessageBox,
+    QFileDialog, QApplication,
 )
 
 from ..models import Network, ScanResult
@@ -23,7 +23,7 @@ from ..export import write_scan_csv
 from ..corewlan_scanner import LocationPermissionRequired
 from .background import run_in_background
 from ..logging_setup import get_logger
-from .styles import DARK_THEME, BAND_COLORS
+from .styles import DARK_THEME
 from .channel_map import ChannelMapWidget
 from .signal_graph import SignalGraphWidget
 from .network_table import NetworkTableWidget
@@ -70,11 +70,13 @@ class ScannerWorker(QThread):
         self._replay = replay
         self._record = record
         self.backend_name = ""
+        self.backend_estimated = False
 
     def _activate(self, factories):
         """Open the first working backend from ``factories``."""
         backend, rest = open_first(factories, debug=self.debug_message.emit)
         self.backend_name = backend.name if backend else ""
+        self.backend_estimated = bool(backend and backend.estimated)
         self.backend_changed.emit(self.backend_name)
         if backend is not None:
             cap = backend.capability()
@@ -624,7 +626,10 @@ class MainWindow(QMainWindow):
 
     @Slot(str)
     def _on_backend_changed(self, name: str):
-        self._status_backend.setText(f"Backend: {name}" if name else "No scanner")
+        est = self._worker.backend_estimated if hasattr(self, "_worker") else False
+        self._status_backend.setText(
+            (f"Backend: {name}" + (" (RSSI/width estimated)" if est else "")) if name
+            else "No scanner")
         self._logger.info(f"Active scanner backend: {name or 'none'}")
         if not name:
             self._statusbar.showMessage(
@@ -677,15 +682,12 @@ class MainWindow(QMainWindow):
         self._bssid_tracker.feed_scan(feed_list)
 
         # Update signal graph
-        band = self._band_combo.currentText()
         self._signal_graph.add_sample(self._get_band_filtered(result.networks))
 
         # Refresh everything
         self._refresh_table()
 
         # Update SSID filter checkboxes
-        band = self._band_combo.currentText()
-        current_band = band if band != "All Bands" else "2.4 GHz"
         current_ssids = set()
         for net in result.networks:
             if net.ssid:
@@ -735,12 +737,12 @@ class MainWindow(QMainWindow):
         self._statusbar.showMessage(f"⚠ {error}", 30000)
         # If debug panel isn't visible, make it flash
         if not self._debug_log.isVisible():
-            self._status_scan.setText(f"⚠ Error — press Ctrl+D for details")
+            self._status_scan.setText("⚠ Error — press Ctrl+D for details")
             self._status_scan.setStyleSheet("color: #ef4444; padding: 2px 8px;")
 
     @Slot()
     def _on_scan_started(self):
-        self._status_scan.setText(f"Scanning...")
+        self._status_scan.setText("Scanning...")
 
     # ── Filtering / refresh ──
 

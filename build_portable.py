@@ -53,7 +53,7 @@ def main():
     build_dir = PROJECT_DIR / "build"
     if build_dir.exists():
         shutil.rmtree(build_dir)
-        print(f"  Removed build/")
+        print("  Removed build/")
     # NOTE: dist/ is NOT cleaned here — a prior step (build_exe.py) may have
     # placed the folder build + zip there; we only add our single exe.
 
