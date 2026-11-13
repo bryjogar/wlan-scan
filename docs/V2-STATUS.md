@@ -35,7 +35,7 @@ Legend: ✅ done · 🔧 in progress · ⛔ blocked · ⬜ not started
 | Item | State | Notes |
 |---|---|---|
 | F1 Survey project file | ✅ | `wlan_scan/survey/project.py`: `.wlansurvey` zip = `project.json` (schema 1, name, site, created/modified, settings, floors with image/scale/boundary/AP markers, points) + `samples.jsonl` (one line per scan at a point) + `plans/<floor>.<ext>`. Atomic save, newer-schema refusal with a clear message, migration hook. Autosave sidecar `<file>.autosave` (untitled → user cache dir) + recovery check. The Save/Save As/Open actions and the 60 s autosave timer are in the Survey tab (F4). |
-| F2 Floor plan import | ⬜ | |
+| F2 Floor plan import | ✅ | `wlan_scan/survey/plan_import.py`: PNG/JPG stored as-is; PDF pages rendered with QtPdf (long side ≈ 3000 px, flattened on white); multi-page PDFs open a thumbnail page picker (`gui/survey_dialogs.py`). Multiple floors per project, each with its own image, scale, boundary, points (model from F1; floor switching UI in F4). Specs: QtPdf added to hidden imports and removed from the onefile build's excludes. |
 | F3 Scale calibration | ⬜ | |
 | F4 Survey tab | ⬜ | |
 | F5 Heatmap | ⬜ | |
@@ -68,6 +68,7 @@ Each needs a run on a real machine before release.
 | R9 | macOS | CoreWLAN scan iterates the NSSet it actually returns (v1 called `.items()` on it, so CoreWLAN probably always failed over to airport); RSSI from `rssiValue()`; channel via `wlanChannel()`; `CWChannelWidth` fixed (0 = Unknown, 1 = 20 …); band from `channelBand()` (6 GHz was guessed from the channel number); security probed with `supportsSecurity:` (the v1 `securityType` enum table didn't match Apple's); Location permission detection + CoreLocation request; airport gated by OS version; log dir. | On macOS 14/15: first launch of the .app prompts for Location; after granting, networks list with SSIDs/BSSIDs, 6 GHz APs show as 6 GHz, widths match System Information → Wi-Fi. Deny permission: a dialog explains how to grant it. Ctrl+D shows `Using scanner backend: corewlan`. Logs land in ~/Library/Logs/WLANScan. |
 | R11 | Windows + macOS release builds | Build scripts write the version from the tag; mac Info.plist versions come from it. | After tagging, the built app's title reads "WLAN Scan X.Y.Z", macOS About/Finder shows X.Y.Z, and no "Update available" appears when running the latest release. (Not testable here without publishing a tag.) |
 | R12 | Windows (netsh fallback) | Parser rewritten (it crashed before). | Run `python -c "from wlan_scan import netsh_scanner as n; r = n.scan(); print([(b.ssid, b.bssid, b.band, b.rssi) for x in r.networks for b in x.bss_list])"`: every visible BSSID appears; 6 GHz ones say 6 GHz; RSSI ≈ `netsh` Signal % / 2 − 100. If your Windows isn't English, note that labels are localised and unparsed. |
+| F2 | Windows + macOS builds | Built apps must bundle QtPdf (pdfium). | Import a PDF floor plan in the built app (all three: onedir, onefile, .app). |
 | R1 | macOS | CoreWLAN + airport set `center_channel` (airport from `,+1`/`,-1`, CoreWLAN from the 5/6 GHz plan) and CoreWLAN fills `center_frequency`. | Same channel map check on a Mac. |
 
 ## Plan deviations and findings
