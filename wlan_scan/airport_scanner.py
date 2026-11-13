@@ -25,7 +25,7 @@ from typing import Optional
 
 from .models import BSSEntry, Network, ScanResult
 from .channels import standard_center_channel
-from .oui_lookup import lookup_vendor
+from .vendors import lookup_vendor
 
 _AIRPORT = ("/System/Library/PrivateFrameworks/Apple80211.framework/"
             "Versions/Current/Resources/airport")

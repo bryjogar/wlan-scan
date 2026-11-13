@@ -156,6 +156,9 @@ class MainWindow(QMainWindow):
         # Check for updates in background (non-blocking)
         if check_updates:
             self._check_for_updates()
+            # Refresh the IEEE vendor list if the bundled one is >90 days old
+            from ..vendors import refresh_in_background
+            refresh_in_background()
 
     @staticmethod
     def _app_icon() -> QIcon:

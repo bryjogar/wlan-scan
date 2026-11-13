@@ -14,7 +14,7 @@ from typing import Optional
 
 from .bss import build_bss_entry
 from .models import BSSEntry, ScanResult, group_networks
-from .oui_lookup import lookup_vendor
+from .vendors import lookup_vendor
 
 
 # ── PowerShell bridge script (known-working from test_bss_bridge.py) ──

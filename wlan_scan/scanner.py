@@ -17,7 +17,7 @@ from typing import Callable, Optional
 from .models import BSSEntry, Network, ScanResult
 from .bss import build_bss_entry
 from .channels import freq_to_channel as _freq_to_channel_mhz
-from .vendor_lookup import lookup_vendor
+from .vendors import lookup_vendor
 
 # ---------------------------------------------------------------------------
 # Constants

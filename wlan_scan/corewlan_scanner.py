@@ -21,7 +21,7 @@ from typing import Callable, Optional
 
 from .models import BSSEntry, Network, ScanResult
 from .channels import channel_to_freq, standard_center_channel
-from .oui_lookup import lookup_vendor
+from .vendors import lookup_vendor
 
 # CWChannelWidth values (CoreWLAN)
 _CH_WIDTH = {

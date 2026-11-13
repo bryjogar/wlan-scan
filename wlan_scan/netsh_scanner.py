@@ -12,7 +12,7 @@ from datetime import datetime
 from typing import Optional
 
 from .models import BSSEntry, Network, ScanResult
-from .vendor_lookup import lookup_vendor
+from .vendors import lookup_vendor
 
 
 def _run_netsh() -> str:

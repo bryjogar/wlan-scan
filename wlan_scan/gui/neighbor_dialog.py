@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (
     QMessageBox, QProgressBar, QFrame, QAbstractItemView,
 )
 
-from ..vendor_lookup import lookup_vendor
+from ..vendors import lookup_vendor
 from .styles import DARK_THEME
 
 # Regex to extract local IP and subnet from ipconfig output

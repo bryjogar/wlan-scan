@@ -37,6 +37,14 @@ def embed_version():
     return sha
 
 
+def update_oui_snapshot():
+    """Refresh the bundled IEEE OUI list; keep the committed one on failure."""
+    script = PROJECT_DIR / "tools" / "build_oui.py"
+    r = subprocess.run([sys.executable, str(script)], cwd=PROJECT_DIR)
+    if r.returncode != 0:
+        print("  OUI refresh failed - using the committed snapshot")
+
+
 def main():
     print("=" * 60)
     print("WLAN Scan - single-file portable build")
@@ -55,6 +63,7 @@ def main():
 
     print("\n[1/3] Embedding version info...")
     embed_version()
+    update_oui_snapshot()
 
     print("\n[2/3] Cleaning previous build...")
     build_dir = PROJECT_DIR / "build"

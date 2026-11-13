@@ -27,6 +27,7 @@ from typing import IO, Iterable, Optional
 
 from .backends import BaseBackend, DebugFn
 from .models import BSSEntry, ScanResult, group_networks
+from .vendors import lookup_vendor
 
 FORMAT_VERSION = 1
 
@@ -176,6 +177,8 @@ class ReplayBackend(BaseBackend):
                 b = dataclasses.replace(b, timestamp=now)
                 if self.reparse and b.ies_raw:
                     _reparse(b)
+                if not b.vendor:
+                    b.vendor = lookup_vendor(b.bssid)
                 entries.append(b)
         return ScanResult(
             timestamp=now,

@@ -91,3 +91,11 @@ def test_replay_fixture_reparses_ies():
     bss = [b for n in r.networks for b in n.bss_list]
     assert len(bss) == 8
     assert all(b.security for b in bss)
+
+
+def test_replay_fills_vendor():
+    rb = ReplayBackend(FIXTURES / "synthetic_office.jsonl")
+    rb.open()
+    vendors = {b.bssid: b.vendor for n in rb.scan().networks for b in n.bss_list}
+    assert vendors["A0:36:BC:10:00:01"] == "ASUSTek COMPUTER"
+    assert vendors["A2:36:BC:10:00:01"] == "Randomized"
