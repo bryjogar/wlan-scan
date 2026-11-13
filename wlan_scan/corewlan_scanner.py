@@ -1,16 +1,19 @@
 """macOS Wi-Fi scanner via CoreWLAN (pyobjc).
 
-Proper macOS API — no private-CLI text parsing. Gives per-network:
-    SSID, BSSID, RSSI, channel number + width, security type (enum),
-    beacon interval, IBSS flag, country code.
+Per network: SSID, BSSID, RSSI, noise, channel number / width / band,
+security (probed with ``supportsSecurity:``), beacon interval, country code.
 
-Not available via public macOS APIs (Windows gets these from raw IE
-parsing, which CoreWLAN does not expose):
-    station_count, channel_utilization, max_rate (left blank), raw IEs,
-    per-network PHY.
+Not available from public macOS APIs (Windows gets these from raw IEs,
+which CoreWLAN does not expose): station count, channel utilization, max
+rate, per-network PHY. Those stay blank.
 
-pyobjc is macOS-only: this module imports lazily inside scan(), so the
-package still imports on Windows/Linux.
+Location Services: since macOS 10.15 (enforced harder in 14+), an app
+without location permission gets networks with nil SSID *and* nil BSSID.
+v1 skipped those silently, so the list was just empty. ``scan()`` now
+raises ``LocationPermissionRequired`` with instructions instead.
+
+pyobjc is macOS-only: CoreWLAN is imported inside ``scan()``, and the
+mapping helpers are duck-typed so tests can feed them fake CWNetworks.
 """
 
 from __future__ import annotations
@@ -19,76 +22,174 @@ import sys
 from datetime import datetime
 from typing import Callable, Optional
 
-from .models import BSSEntry, Network, ScanResult
-from .channels import channel_to_freq, standard_center_channel
+from .channels import BAND_24, BAND_5, BAND_6, channel_to_freq, standard_center_channel
+from .models import BSSEntry, ScanResult, group_networks
 from .vendors import lookup_vendor
 
-# CWChannelWidth values (CoreWLAN)
+LOCATION_HELP = (
+    "macOS is hiding Wi-Fi network names and BSSIDs because WLAN Scan has no "
+    "Location Services permission. Open System Settings → Privacy & Security → "
+    "Location Services and switch on WLAN Scan (when running from source, the "
+    "terminal or Python app you launched it from), then scan again. The app "
+    "bundle asks for this via NSLocationUsageDescription in its Info.plist "
+    "(set in wlan-scan-mac.spec)."
+)
+
+
+class LocationPermissionRequired(RuntimeError):
+    """CoreWLAN returned networks with SSID and BSSID redacted."""
+
+    def __init__(self, count: int):
+        super().__init__(LOCATION_HELP)
+        self.count = count
+
+
+# CWChannelWidth (CoreWLAN/CoreWLANTypes.h): 0 is Unknown.
 _CH_WIDTH = {
-    0: 20,    # kCWChannelWidth20MHz
-    1: 40,    # kCWChannelWidth40MHz
-    2: 80,    # kCWChannelWidth80MHz
-    3: 160,   # kCWChannelWidth160MHz
-    4: 160,   # kCWChannelWidth80p80MHz
+    1: 20,    # kCWChannelWidth20MHz
+    2: 40,    # kCWChannelWidth40MHz
+    3: 80,    # kCWChannelWidth80MHz
+    4: 160,   # kCWChannelWidth160MHz
 }
 
-# CWSecurityType → (security, auth_algo) mapping (subset that matters).
-_SECURITY_MAP = {
-    0: ("Open", "Open"),                  # kCWSecurityNone
-    1: ("WEP", "WEP"),                    # kCWSecurityWEP
-    2: ("WPA", "WPA"),                    # kCWSecurityWPAPersonal
-    3: ("WPA", "WPA"),                    # kCWSecurityWPAPersonalMixed
-    4: ("WPA2", "WPA2"),                  # kCWSecurityWPA2Personal
-    5: ("WPA2", "WPA2"),                  # kCWSecurityPersonal
-    6: ("WEP", "WEP"),                    # kCWSecurityDynamicWEP
-    7: ("WPA2", "WPA2"),                  # kCWSecurityWPA2PersonalMixed
-    8: ("WPA", "WPA"),                    # kCWSecurityWPAGroup
-    9: ("WPA2", "WPA2"),                  # kCWSecurityWPAGroupMixed
-    10: ("WPA2", "WPA2"),                 # kCWSecurityWPA2Group
-    11: ("WPA2", "WPA2"),                 # kCWSecurityWPA2GroupMixed
-    12: ("WPA3", "WPA3"),                 # kCWSecurityWPA3Personal
-    13: ("WPA3", "WPA3"),                 # kCWSecurityWPA3Enterprise
-    14: ("WPA3", "WPA3"),                 # kCWSecurityWPA3Transition
-    15: ("WPA3", "WPA3"),                 # kCWSecurityWPA3TransitionGroup
-    16: ("Enterprise", "802.1X"),         # kCWSecurityEnterprise
-    17: ("Enterprise", "802.1X"),         # kCWSecurityEnterpriseMixed
-    18: ("WPA3", "WPA3"),                 # kCWSecurityWPA3EnterpriseMixed
-    19: ("Enterprise", "802.1X"),         # kCWSecurityWPA2EnterpriseMixed
+# CWChannelBand
+_CH_BAND = {1: BAND_24, 2: BAND_5, 3: BAND_6}
+
+# CWSecurity (CoreWLANTypes.h)
+CW_SECURITY = {
+    "none": 0, "wep": 1, "wpa_personal": 2, "wpa_personal_mixed": 3,
+    "wpa2_personal": 4, "personal": 5, "dynamic_wep": 6, "wpa_enterprise": 7,
+    "wpa_enterprise_mixed": 8, "wpa2_enterprise": 9, "enterprise": 10,
+    "wpa3_personal": 11, "wpa3_enterprise": 12, "wpa3_transition": 13,
+    "owe": 14, "owe_transition": 15,
 }
 
+# Probe order: strongest / most specific first → (label, auth)
+_SECURITY_PROBES = [
+    ("wpa3_enterprise", "WPA3-Enterprise", "802.1X"),
+    ("wpa3_transition", "WPA2/WPA3", "PSK / SAE"),
+    ("wpa3_personal", "WPA3", "SAE"),
+    ("owe", "OWE (Enhanced Open)", "OWE"),
+    ("owe_transition", "Open (OWE transition)", "Open"),
+    ("wpa2_enterprise", "WPA2-Enterprise", "802.1X"),
+    ("wpa_enterprise_mixed", "WPA/WPA2-Enterprise", "802.1X"),
+    ("wpa_enterprise", "WPA-Enterprise", "802.1X"),
+    ("wpa2_personal", "WPA2", "PSK"),
+    ("wpa_personal_mixed", "WPA/WPA2", "PSK"),
+    ("wpa_personal", "WPA", "PSK"),
+    ("dynamic_wep", "WEP", "802.1X"),
+    ("wep", "WEP", "WEP"),
+]
 
-def _security_from_cw(raw: int) -> tuple[str, str]:
-    """Map a CWSecurityType int to (security, auth)."""
-    return _SECURITY_MAP.get(raw, ("Unknown", f"cw:{raw}"))
+
+def security_from_network(net) -> tuple[str, str]:
+    """(security, auth) by probing ``supportsSecurity:`` (the public API)."""
+    probe = getattr(net, "supportsSecurity_", None)
+    if probe is None:
+        return "Unknown", ""
+    for key, label, auth in _SECURITY_PROBES:
+        try:
+            if probe(CW_SECURITY[key]):
+                return label, auth
+        except Exception:
+            continue
+    try:
+        if probe(CW_SECURITY["none"]):
+            return "Open", "Open"
+    except Exception:
+        pass
+    return "Unknown", ""
 
 
 def _band_from_channel(channel: int) -> str:
+    """Fallback when CWChannel has no band: 6 GHz numbers overlap 2.4/5."""
     if channel <= 14:
-        return "2.4 GHz"
-    if channel <= 35:
-        return "6 GHz"
-    if channel <= 177:
-        return "5 GHz"
-    return "6 GHz"
+        return BAND_24
+    return BAND_5
 
 
 def _wifi_generation(width: int, band: str) -> str:
-    """Best-effort generation from channel width + band (no PHY on macOS).
+    """Coarse generation from band + width (CoreWLAN gives no PHY per network).
 
-    Coarse but useful: 6 GHz is Wi-Fi 6E territory; on 5 GHz, 80+ MHz is
-    802.11ac (Wi-Fi 5), 40 MHz could be n or ac — call it Wi-Fi 5; on
-    2.4 GHz, anything ≤40 MHz is 802.11n (Wi-Fi 4).
+    6 GHz is Wi-Fi 6E or later; 160 MHz on 5 GHz is most likely Wi-Fi 6;
+    anything else is reported as the minimum that fits.
     """
-    if band == "6 GHz":
+    if band == BAND_6:
         return "Wi-Fi 6E"
-    if band == "5 GHz":
+    if band == BAND_5:
         if width >= 160:
-            return "Wi-Fi 6"  # ax wave2; ac wave2 also does 160 — uncertain
-        if width >= 40:
+            return "Wi-Fi 6"
+        if width >= 80:
             return "Wi-Fi 5"
         return "Wi-Fi 4"
-    # 2.4 GHz
     return "Wi-Fi 4"
+
+
+def _call(obj, name, default=None):
+    fn = getattr(obj, name, None)
+    if fn is None:
+        return default
+    try:
+        v = fn()
+    except Exception:
+        return default
+    return default if v is None else v
+
+
+def map_network(net, timestamp: datetime) -> Optional[BSSEntry]:
+    """CWNetwork (or a duck-typed fake) → BSSEntry; None if BSSID is redacted."""
+    bssid = str(_call(net, "bssid", "") or "").upper()
+    if not bssid:
+        return None
+    ssid = str(_call(net, "ssid", "") or "")
+    channel = _call(net, "wlanChannel")
+    ch_num = int(_call(channel, "channelNumber", 0)) if channel is not None else 0
+    width = _CH_WIDTH.get(int(_call(channel, "channelWidth", 0)) if channel is not None else 0, 20)
+    band = _CH_BAND.get(int(_call(channel, "channelBand", 0)) if channel is not None else 0) \
+        or _band_from_channel(ch_num)
+    security, auth = security_from_network(net)
+    entry = BSSEntry(
+        bssid=bssid,
+        ssid=ssid,
+        rssi=int(_call(net, "rssiValue", -100)),
+        channel=ch_num,
+        channel_width=width,
+        center_channel=standard_center_channel(ch_num, width, band),
+        band=band,
+        center_frequency=channel_to_freq(ch_num, band),
+        security=security,
+        auth_algo=auth,
+        vendor=lookup_vendor(bssid),
+        wifi_generation=_wifi_generation(width, band),
+        beacon_period=int(_call(net, "beaconInterval", 0)),
+        timestamp=timestamp,
+    )
+    if _call(net, "ibss", False):
+        entry.phy_type = "IBSS"
+    return entry
+
+
+def map_networks(networks, timestamp: datetime,
+                 debug: Optional[Callable[[str], None]] = None) -> list[BSSEntry]:
+    """Map a scan's CWNetworks. Raises LocationPermissionRequired when every
+    network came back with its BSSID redacted."""
+    entries, redacted = [], 0
+    for net in networks:
+        try:
+            e = map_network(net, timestamp)
+        except Exception as ex:
+            if debug:
+                debug(f"CoreWLAN entry skipped: {ex}")
+            continue
+        if e is None:
+            redacted += 1
+        else:
+            entries.append(e)
+    if redacted and not entries:
+        raise LocationPermissionRequired(redacted)
+    if redacted and debug:
+        debug(f"CoreWLAN: {redacted} network(s) without BSSID skipped")
+    return entries
 
 
 def corewlan_available() -> bool:
@@ -115,66 +216,26 @@ def scan(interface: str = "", debug: Optional[Callable[[str], None]] = None) -> 
     if iface is None:
         raise RuntimeError("No Wi-Fi interface available (Wi-Fi may be off).")
 
-    # returns dict NSDictionary {CWNetwork: NSNumber rssi} (retained)
+    # Returns (NSSet<CWNetwork>, NSError). v1 treated the set as a dict.
     found, error = iface.scanForNetworksWithName_includeHidden_error_(None, True, None)
     if error:
         raise RuntimeError(f"CoreWLAN scan failed: {error}")
 
-    result = ScanResult(timestamp=datetime.now(),
-                        interface_name=iface.interfaceName() or interface)
-    seen: dict[str, Network] = {}
+    ts = datetime.now()
+    entries = map_networks(list(found or []), ts, debug)
+    return ScanResult(timestamp=ts, networks=group_networks(entries),
+                      interface_name=str(iface.interfaceName() or interface))
 
-    networks = found if found else {}
-    for net, rssi_num in networks.items():
-        try:
-            bssid = (net.bssid() or "").upper()
-            ssid = net.ssid() or ""
-            if not bssid:
-                continue
-            channel = net.channel()
-            ch_num = int(channel.channelNumber()) if channel else 0
-            ch_w = int(channel.channelWidth()) if channel else 0
-            width = _CH_WIDTH.get(ch_w, 20)
-            sec_raw = int(net.securityType()) if hasattr(net, "securityType") else 0
-            security, auth = _security_from_cw(sec_raw)
-            beacon = int(net.beaconInterval()) if hasattr(net, "beaconInterval") else 0
-            country = net.countryCode() or "" if hasattr(net, "countryCode") else ""
-            ibss = bool(net.ibss()) if hasattr(net, "ibss") else False
-            rssi = int(rssi_num) if rssi_num is not None else -100
 
-            band = _band_from_channel(ch_num)
-            entry = BSSEntry(
-                bssid=bssid,
-                ssid=ssid,
-                rssi=rssi,
-                channel=ch_num,
-                channel_width=width,
-                center_channel=standard_center_channel(ch_num, width, band),
-                band=band,
-                center_frequency=channel_to_freq(ch_num, band),
-                security=security,
-                auth_algo=auth,
-                vendor=lookup_vendor(bssid),
-                wifi_generation=_wifi_generation(width, band),
-                beacon_period=beacon,
-                timestamp=result.timestamp,
-            )
-            if ibss:
-                entry.phy_type = "IBSS"
+def connected_bssid() -> Optional[str]:
+    try:
+        import CoreWLAN
 
-            net_obj = seen.get(ssid)
-            if net_obj is None:
-                net_obj = Network(ssid=ssid)
-                seen[ssid] = net_obj
-                result.networks.append(net_obj)
-            net_obj.bss_list.append(entry)
-            net_obj.refresh_summary()
-        except Exception as e:
-            if debug:
-                debug(f"CoreWLAN entry skipped: {e}")
-            continue
-
-    return result
+        iface = CoreWLAN.CWWiFiClient.sharedWiFiClient().interface()
+        b = iface.bssid() if iface is not None else None
+        return str(b).upper() if b else None
+    except Exception:
+        return None
 
 
 if __name__ == "__main__":

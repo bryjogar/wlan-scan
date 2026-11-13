@@ -24,7 +24,7 @@ Legend: ✅ done · 🔧 in progress · ⛔ blocked · ⬜ not started
 | R6 Scan timing | ✅ | `wlan_scan/scan_cycle.py`: trigger → wait for `wlan_notification_acm_scan_complete`/`_scan_fail` (registered with `WlanRegisterNotification`, 4 s timeout fallback) → read cached list. No fixed 2 s sleep or 1.5 s cooldown. Rejected `WlanScan` reads the cached list immediately. `WiFiScanner.read_cached_results()` reads without scanning. Worker interval is start-to-start. Status bar shows measured s/scan and smoothed period. ARM64's PowerShell bridge still pays PowerShell start-up (~1–2 s) per scan plus its 500 ms wait: a persistent bridge process would fix that but wasn't in scope. |
 | R7 Don't block the GUI thread | ✅ | Connected BSSID is polled every 10 s on a worker-owned thread and travels on `ScanResult.connected_bssid` (also recorded/replayed: survey needs it). Gateway lookup is `connection.default_gateway()` (Windows `route print`, macOS `route -n get default`, Linux `ip route`), run via `gui/background.run_in_background`; the ping dialog opens at once and fills the gateway in when found (only if the field is still empty). Not in the plan and left alone: the Neighbors dialog still runs `ipconfig` (5 s timeout) on open. |
 | R8 Start/stop and auto-scan | ✅ | Worker waits on a `threading.Event` (stop/pause/resume/scan-once/interval change wake it); `stop()` also calls `backend.request_stop()` (ends a wlanapi wait; kills a running PowerShell bridge). The button follows the thread's real state (`finished` signal): Scan / Stop / Stopping… (disabled) / Scan once. Auto-scan is wired to pause/resume: off = paused with the backend open, and the button takes one scan per click (survey mode reuses `scan_once()`). Launch with Auto-scan off takes one scan. |
-| R9 macOS correctness | ⬜ | |
+| R9 macOS correctness | ✅ | "Non-Windows platform" warning removed; a "no scanner available" message shows only when no backend opens. Logs name the real backend (`Using scanner backend: corewlan`); `macos_scanner.py` (misleading wrapper) deleted. airport fallback refused on macOS ≥ 14.4 with a reason. All-redacted CoreWLAN results raise `LocationPermissionRequired`; the GUI shows how to grant permission once (dialog) and keeps a status-bar note, and keeps retrying. CoreWLAN backend asks CoreLocation for when-in-use authorization (new darwin-only dep `pyobjc-framework-CoreLocation`), since macOS 14+ only lists apps that asked. macOS log dir `~/Library/Logs/WLANScan` (Linux now `~/.local/state/WLANScan/logs`). Also fixed CoreWLAN bugs beyond the plan (see findings). |
 | R10 CSV export | ⬜ | |
 | R11 Versioning and updates | ⬜ | |
 | R12 Logging and cleanup | ⬜ | |
@@ -65,6 +65,7 @@ Each needs a run on a real machine before release.
 | R6 | Windows x64 (wlanapi) | `WlanRegisterNotification` (ACM source) with a ctypes callback; scan ends on scan_complete/scan_fail; unregisters on close. | Ctrl+D log shows "Scan-complete notifications registered" and lines like "Scan notification in 2.3 s"; at the 1 s interval the status bar shows a period close to the scan time, not ≥3.5 s. Stop/close doesn't hang or crash (callback is unregistered before the handle closes). |
 | R7 | Windows + macOS | Gateway via `route print` / `route -n get default` on a background thread; connected-BSSID polling moved to a thread. | Click Ping: dialog opens instantly, gateway appears within a second. The connected network still gets its ● marker in the table. |
 | R8 | Windows ARM64 (PowerShell bridge) | Bridge now runs via `Popen` so Stop/close can kill it mid-scan. | Click Stop during a scan: button shows "Stopping…" briefly, then "Scan"; no stray `powershell.exe` left in Task Manager. |
+| R9 | macOS | CoreWLAN scan iterates the NSSet it actually returns (v1 called `.items()` on it, so CoreWLAN probably always failed over to airport); RSSI from `rssiValue()`; channel via `wlanChannel()`; `CWChannelWidth` fixed (0 = Unknown, 1 = 20 …); band from `channelBand()` (6 GHz was guessed from the channel number); security probed with `supportsSecurity:` (the v1 `securityType` enum table didn't match Apple's); Location permission detection + CoreLocation request; airport gated by OS version; log dir. | On macOS 14/15: first launch of the .app prompts for Location; after granting, networks list with SSIDs/BSSIDs, 6 GHz APs show as 6 GHz, widths match System Information → Wi-Fi. Deny permission: a dialog explains how to grant it. Ctrl+D shows `Using scanner backend: corewlan`. Logs land in ~/Library/Logs/WLANScan. |
 | R1 | macOS | CoreWLAN + airport set `center_channel` (airport from `,+1`/`,-1`, CoreWLAN from the 5/6 GHz plan) and CoreWLAN fills `center_frequency`. | Same channel map check on a Mac. |
 
 ## Plan deviations and findings
@@ -83,3 +84,12 @@ Things in the plan that turned out different in the code, and what was done.
   ctypes PHY-type table was shifted by one. These would have made the x64
   path's results differ from ARM64 regardless of the parser, so they were
   fixed here. Can't be run on this machine: listed under hardware checks.
+- **R9:** `corewlan_scanner.scan()` treated the NSSet from
+  `scanForNetworksWithName:includeHidden:error:` as a dict and read
+  `net.channel()`/`securityType()`, which aren't the public accessors; the
+  width enum was off by one. Rewritten against the CoreWLAN headers with a
+  duck-typed mapper tested on fakes. Needs a real Mac.
+- **R9:** the plan says to point users at the Info.plist key; the key was
+  already in `wlan-scan-mac.spec`, but on macOS 14+ an app also has to *ask*
+  (CoreLocation) before it shows in Location Services, so that request was
+  added.

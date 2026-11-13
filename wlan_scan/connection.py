@@ -41,17 +41,15 @@ def _windows_connected_bssid() -> Optional[str]:
 
 
 def _macos_connected_bssid() -> Optional[str]:
-    """CoreWLAN interface bssid; falls back to `airport -I`."""
-    try:
-        import CoreWLAN
-        client = CoreWLAN.CWWiFiClient.sharedWiFiClient()
-        iface = client.interface()
-        if iface is not None:
-            bssid = iface.bssid()
-            if bssid:
-                return str(bssid).upper()
-    except Exception:
-        pass
+    """CoreWLAN interface bssid; falls back to `airport -I` before macOS 14.4."""
+    from .corewlan_scanner import connected_bssid as cw_connected
+    from .airport_scanner import airport_removed
+
+    b = cw_connected()
+    if b:
+        return b
+    if sys.platform == "darwin" and airport_removed():
+        return None
 
     # Fallback: airport -I prints "BSSID: xx:xx:xx:xx:xx:xx"
     airport = ("/System/Library/PrivateFrameworks/Apple80211.framework/"

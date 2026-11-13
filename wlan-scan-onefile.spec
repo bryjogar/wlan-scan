@@ -27,7 +27,6 @@ a = Analysis(
         'wlan_scan.channels',
         'wlan_scan.netsh_scanner',
         'wlan_scan.pwsh_scanner',
-        'wlan_scan.macos_scanner',
         'wlan_scan.airport_scanner',
         'wlan_scan.corewlan_scanner',
         'wlan_scan.connection',

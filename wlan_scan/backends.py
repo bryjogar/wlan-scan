@@ -8,7 +8,7 @@ there is exactly one place that decides which scanner runs.
 Order per platform:
     Windows x64    wlanapi (ctypes) -> PowerShell bridge -> netsh
     Windows ARM64  PowerShell bridge -> netsh   (ctypes struct passing is broken)
-    macOS          CoreWLAN -> airport CLI (only where airport still exists)
+    macOS          CoreWLAN -> airport CLI (only before macOS 14.4)
     other          none — use --replay
     --replay FILE  replay only
 """
@@ -180,11 +180,30 @@ class CoreWLANBackend(BaseBackend):
 
         if not corewlan_scanner.corewlan_available():
             raise BackendUnavailable("CoreWLAN (pyobjc) not available")
+        self._location = _request_location_authorization(self.dbg)
 
     def scan(self) -> ScanResult:
         from . import corewlan_scanner
 
         return corewlan_scanner.scan(debug=self._debug)
+
+
+def _request_location_authorization(dbg):
+    """Ask CoreLocation for when-in-use authorization so macOS lists the app
+    under Location Services (14+ only lists apps that asked). Best effort:
+    needs pyobjc-framework-CoreLocation. Returns the manager (keep it alive)."""
+    try:
+        import CoreLocation
+
+        mgr = CoreLocation.CLLocationManager.alloc().init()
+        status = CoreLocation.CLLocationManager.authorizationStatus()
+        if status == 0:  # kCLAuthorizationStatusNotDetermined
+            mgr.requestWhenInUseAuthorization()
+            dbg("Requested Location Services authorization")
+        return mgr
+    except Exception as e:
+        dbg(f"CoreLocation unavailable ({e}); grant Location access manually if SSIDs are hidden")
+        return None
 
 
 class AirportBackend(BaseBackend):
@@ -193,9 +212,13 @@ class AirportBackend(BaseBackend):
     def open(self) -> None:
         from . import airport_scanner
 
-        if sys.platform != "darwin" or airport_scanner._find_airport() is None:
+        if sys.platform != "darwin":
+            raise BackendUnavailable("airport is macOS-only")
+        if airport_scanner.airport_removed():
             raise BackendUnavailable(
-                "airport CLI not found (Apple removed it in macOS 14.4)")
+                "airport fallback not available: Apple removed it in macOS 14.4")
+        if airport_scanner._find_airport() is None:
+            raise BackendUnavailable("airport CLI not found")
 
     def scan(self) -> ScanResult:
         from . import airport_scanner

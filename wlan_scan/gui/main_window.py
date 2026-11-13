@@ -19,6 +19,7 @@ from ..backends import candidate_backends, open_first
 from ..recording import ScanRecorder
 from ..scan_cycle import RateMeter
 from ..connection import default_gateway
+from ..corewlan_scanner import LocationPermissionRequired
 from .background import run_in_background
 from ..logging_setup import get_logger
 from .styles import DARK_THEME, BAND_COLORS
@@ -54,6 +55,7 @@ class ScannerWorker(QThread):
     debug_message = Signal(str)
     capability_detected = Signal(object)  # InterfaceCapability
     backend_changed = Signal(str)  # name of the active backend ("" = none)
+    permission_needed = Signal(str)  # e.g. macOS Location Services; text = how to fix
 
     def __init__(self, parent=None, replay: str | None = None,
                  record: str | None = None):
@@ -127,6 +129,9 @@ class ScannerWorker(QThread):
                     recorder.write(result)
                 if self._running:
                     self.scan_complete.emit(result)
+            except LocationPermissionRequired as e:
+                # Keep retrying CoreWLAN each interval: the user may grant it.
+                self.permission_needed.emit(str(e))
             except Exception as e:
                 if not self._running:
                     break
@@ -520,15 +525,9 @@ class MainWindow(QMainWindow):
         self._worker.capability_detected.connect(self._on_capability_detected)
         self._worker.backend_changed.connect(self._on_backend_changed)
         self._worker.finished.connect(self._on_worker_finished)
+        self._worker.permission_needed.connect(self._on_permission_needed)
         self._stopping = False
 
-        # Check platform
-        if sys.platform != "win32":
-            self._statusbar.showMessage(
-                "⚠  Running on non-Windows platform — scanner is unavailable. "
-                "Use for UI development only.",
-                0,
-            )
 
         # Scan on launch (Auto-scan off: one scan, then wait for clicks)
         self._start_scanning()
@@ -627,6 +626,20 @@ class MainWindow(QMainWindow):
     def _on_backend_changed(self, name: str):
         self._status_backend.setText(f"Backend: {name}" if name else "No scanner")
         self._logger.info(f"Active scanner backend: {name or 'none'}")
+        if not name:
+            self._statusbar.showMessage(
+                "⚠  No Wi-Fi scanner is available on this system "
+                "(Windows and macOS are supported; use --replay FILE to play a recording).",
+                0,
+            )
+
+    @Slot(str)
+    def _on_permission_needed(self, text: str):
+        self._statusbar.showMessage("⚠  Location Services permission needed to see networks", 0)
+        if not getattr(self, "_permission_shown", False):
+            self._permission_shown = True
+            self._logger.warning(text)
+            QMessageBox.warning(self, "Location permission needed", text)
 
     @Slot(object)
     def _on_capability_detected(self, cap):

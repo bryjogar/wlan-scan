@@ -43,6 +43,23 @@ _LINE_RE = re.compile(
 )
 
 
+def airport_removed(mac_version: Optional[str] = None) -> bool:
+    """True on macOS 14.4+, where Apple removed `airport` scanning (the
+    binary may linger but only prints a deprecation notice)."""
+    if mac_version is None:
+        import platform
+
+        mac_version = platform.mac_ver()[0]
+    try:
+        parts = [int(x) for x in mac_version.split(".")[:2]]
+    except ValueError:
+        return False
+    if not parts or parts == [0]:
+        return False
+    major, minor = (parts + [0])[:2]
+    return (major, minor) >= (14, 4)
+
+
 def _find_airport() -> Optional[str]:
     """Locate the airport binary; check both the private framework and PATH."""
     if shutil.which("airport"):

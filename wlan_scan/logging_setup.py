@@ -11,19 +11,21 @@ from datetime import datetime
 from pathlib import Path
 
 
-def _log_dir() -> Path:
+def log_dir() -> Path:
     """Get the log directory (platform-appropriate)."""
     if sys.platform == "win32":
         base = Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming"))
-    else:
-        base = Path.home() / ".local" / "share"
+        return base / "WLANScan" / "logs"
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Logs" / "WLANScan"
+    base = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state"))
     return base / "WLANScan" / "logs"
 
 
 def setup_logging() -> logging.Logger:
     """Configure and return a logger that writes to file + console."""
-    log_dir = _log_dir()
-    log_dir.mkdir(parents=True, exist_ok=True)
+    log_dir_ = log_dir()
+    log_dir_.mkdir(parents=True, exist_ok=True)
 
     logger = logging.getLogger("wifiexplorer")
     logger.setLevel(logging.DEBUG)
@@ -34,7 +36,7 @@ def setup_logging() -> logging.Logger:
 
     # File handler (rotating by date in name)
     today = datetime.now().strftime("%Y-%m-%d")
-    log_path = log_dir / f"wifiexplorer-{today}.log"
+    log_path = log_dir_ / f"wifiexplorer-{today}.log"
     fh = logging.FileHandler(str(log_path), encoding="utf-8")
     fh.setLevel(logging.DEBUG)
     fh.setFormatter(logging.Formatter(
