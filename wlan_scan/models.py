@@ -70,6 +70,7 @@ class ScanResult:
     interface_guid: str = ""
     scan_duration: float = 0.0  # seconds the backend took (set by the worker)
     backend: str = ""  # backend that produced it (set by the worker)
+    connected_bssid: str = ""  # BSSID this machine is associated with ("" = none/unknown)
 
 
 def group_networks(entries: Iterable[BSSEntry]) -> list[Network]:

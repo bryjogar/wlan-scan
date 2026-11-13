@@ -427,6 +427,11 @@ class PingDialog(QDialog):
             self._worker.stop_ping()
         event.accept()
 
+    def suggest_target(self, target: str):
+        """Fill the target only if the user hasn't typed one yet."""
+        if not self._target_input.text().strip():
+            self._target_input.setText(target)
+
     def set_target(self, target: str):
         """Set the target from outside (e.g. from main window selection)."""
         self._target_input.setText(target)

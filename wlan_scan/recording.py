@@ -69,6 +69,7 @@ def scan_to_dict(result: ScanResult) -> dict:
     return {
         "t": result.timestamp.isoformat(timespec="milliseconds"),
         "interface": result.interface_name,
+        "connected": result.connected_bssid,
         "bss": [bss_to_dict(b) for n in result.networks for b in n.bss_list],
     }
 
@@ -80,6 +81,7 @@ def scan_from_dict(d: dict) -> ScanResult:
         timestamp=datetime.fromisoformat(ts) if ts else datetime.now(),
         networks=group_networks(entries),
         interface_name=d.get("interface", ""),
+        connected_bssid=(d.get("connected") or "").upper(),
     )
 
 
@@ -185,6 +187,7 @@ class ReplayBackend(BaseBackend):
             networks=group_networks(entries),
             interface_name=src.interface_name or f"Replay: {self.path.name}",
             interface_guid="replay",
+            connected_bssid=src.connected_bssid,
         )
 
 

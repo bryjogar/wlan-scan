@@ -18,6 +18,8 @@ from ..models import Network, ScanResult
 from ..backends import candidate_backends, open_first
 from ..recording import ScanRecorder
 from ..scan_cycle import RateMeter
+from ..connection import default_gateway
+from .background import run_in_background
 from ..logging_setup import get_logger
 from .styles import DARK_THEME, BAND_COLORS
 from .channel_map import ChannelMapWidget
@@ -74,8 +76,27 @@ class ScannerWorker(QThread):
                 self.capability_detected.emit(cap)
         return backend, rest
 
+    def _poll_connected(self):
+        """Refresh the connected BSSID every 10 s on its own thread (netsh can
+        take seconds; this keeps it off both the GUI and the scan cadence)."""
+        from ..connection import connected_bssid
+
+        while self._running:
+            try:
+                self._connected = connected_bssid() or ""
+            except Exception:
+                self._connected = ""
+            self._conn_stop.wait(10.0)
+
     def run(self):
         self._running = True
+        self._connected = ""
+        self._conn_stop = threading.Event()
+        poller = None
+        if not self._replay:
+            poller = threading.Thread(target=self._poll_connected,
+                                      name="connected-bssid", daemon=True)
+            poller.start()
         recorder = ScanRecorder(self._record) if self._record else None
         backend, fallbacks = self._activate(
             candidate_backends(replay=self._replay))
@@ -90,6 +111,8 @@ class ScannerWorker(QThread):
                     result = backend.scan()
                     result.scan_duration = time.monotonic() - cycle_start
                     result.backend = backend.name
+                    if poller is not None:
+                        result.connected_bssid = self._connected
                     if recorder:
                         recorder.write(result)
                     self.scan_complete.emit(result)
@@ -118,9 +141,13 @@ class ScannerWorker(QThread):
                 pass
         if recorder:
             recorder.close()
+        self._conn_stop.set()
 
     def stop(self):
         self._running = False
+        stop_event = getattr(self, "_conn_stop", None)
+        if stop_event is not None:
+            stop_event.set()
 
     def pause(self):
         self._paused = True
@@ -149,8 +176,6 @@ class MainWindow(QMainWindow):
         self._last_result: ScanResult | None = None
         self._rate = RateMeter()
         self._scan_count: int = 0
-        self._conn_bssid: str | None = None
-        self._conn_bssid_ts: float = 0
         self._column_filters: dict = {}
         self._start_time = datetime.now()
 
@@ -658,17 +683,7 @@ class MainWindow(QMainWindow):
         self._channel_map.set_data(
             filtered, band if band != "All Bands" else "2.4 GHz"
         )
-        self._network_table.populate(filtered, self._connected_bssid())
-
-    def _connected_bssid(self) -> str:
-        """Connected BSSID, refreshed at most every 10s (cheap subprocess)."""
-        from ..connection import connected_bssid
-
-        now = time.time()
-        if (self._conn_bssid_ts or 0) + 10 < now or self._conn_bssid is None:
-            self._conn_bssid = connected_bssid() or ""
-            self._conn_bssid_ts = now
-        return self._conn_bssid
+        self._network_table.populate(filtered, self._last_result.connected_bssid)
 
     @Slot(str)
     def _on_debug_message(self, msg: str):
@@ -778,48 +793,21 @@ class MainWindow(QMainWindow):
             self._signal_graph.clear_tracking()
 
     def _on_ping_clicked(self):
-        """Open the ping test dialog."""
-        # Pre-fill with selected BSS info if available
-        default_target = ""
-        bss = self._network_table.get_selected_bss()
-        if bss:
-            # Try to detect gateway from route print (fast Windows call)
-            default_target = self._detect_gateway()
-        dialog = PingDialog(target=default_target, parent=self)
+        """Open the ping dialog; the gateway is looked up in the background
+        and filled in when found (route print can take seconds)."""
+        dialog = PingDialog(target="", parent=self)
         dialog.show()
+
+        def fill(gw):
+            if gw and dialog.isVisible():
+                dialog.suggest_target(gw)
+
+        run_in_background(default_gateway, fill, parent=self)
         # Keep reference so it isn't garbage collected
         if not hasattr(self, '_ping_dialogs'):
             self._ping_dialogs = []
         self._ping_dialogs.append(dialog)
-        # Clean up closed dialogs
         self._ping_dialogs = [d for d in self._ping_dialogs if d.isVisible()]
-
-    @staticmethod
-    def _detect_gateway() -> str:
-        """Try to detect the default gateway via Windows route print."""
-        import subprocess
-        if sys.platform != "win32":
-            return ""
-        try:
-            result = subprocess.run(
-                ["route", "print", "0.0.0.0"],
-                capture_output=True, text=True, timeout=3,
-                creationflags=subprocess.CREATE_NO_WINDOW,
-            )
-            for line in result.stdout.splitlines():
-                if "0.0.0.0" in line:
-                    parts = line.split()
-                    # Format: Network Destination  Netmask  Gateway  Interface  Metric
-                    # Gateway is typically the 3rd column
-                    for i, p in enumerate(parts):
-                        if p == "0.0.0.0":
-                            # Next non-0.0.0.0 IP is likely the gateway
-                            for j in range(i + 1, min(i + 4, len(parts))):
-                                if _is_ip(parts[j]) and parts[j] != "0.0.0.0":
-                                    return parts[j]
-        except Exception:
-            pass
-        return ""
 
     def _on_track_bssid_clicked(self):
         """Toggle BSSID tracking on/off."""
@@ -929,14 +917,3 @@ class MainWindow(QMainWindow):
             self._worker.stop()
             self._worker.wait(3000)
         event.accept()
-
-
-def _is_ip(s: str) -> bool:
-    """Return True if s looks like an IPv4 address."""
-    import ipaddress
-    try:
-        ipaddress.IPv4Address(s)
-        return True
-    except Exception:
-        return False
-
