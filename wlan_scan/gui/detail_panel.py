@@ -8,7 +8,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..models import BSSEntry
-from .styles import signal_color, signal_label, BAND_COLORS
+from .styles import security_color, signal_color, signal_label, BAND_COLORS
 
 
 class DetailPanel(QWidget):
@@ -130,8 +130,8 @@ class DetailPanel(QWidget):
             ("Channel", str(bss.channel), None),
             ("Channel Width", f"{bss.channel_width} MHz" if bss.channel_width > 0 else "—", None),
             ("PHY Mode", bss.phy_type, None),
-            ("Security", bss.security,
-             "#10b981" if "WPA" in (bss.security or "") else "#ef4444"),
+            ("Security", bss.security, security_color(bss.security)),
+            ("PMF (802.11w)", bss.pmf or "—", None),
             ("Cipher", bss.cipher or "—", None),
             ("Auth", bss.auth_algo or "—", None),
             ("Max Rate", f"{bss.max_rate:.0f} Mbps" if bss.max_rate > 0 else "—", None),

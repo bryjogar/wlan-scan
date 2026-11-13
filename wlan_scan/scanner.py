@@ -817,12 +817,15 @@ class WiFiScanner:
                         ie_data = b""
 
                 ie_info = (
-                    parse_information_elements(ie_data, band)
+                    parse_information_elements(
+                        ie_data, band, b.usCapabilityInformation)
                     if ie_data else {}
                 )
 
-                # Security
-                security = ie_info.get("security", "Unknown")
+                # Security (no IEs: fall back to the Privacy bit)
+                security = ie_info.get(
+                    "security",
+                    "WEP" if b.usCapabilityInformation & 0x0010 else "Open")
                 auth = ie_info.get("auth_algo", "")
                 cipher = ie_info.get("cipher", "")
 
@@ -854,6 +857,8 @@ class WiFiScanner:
                     security=security,
                     auth_algo=auth,
                     cipher=cipher,
+                    pmf=ie_info.get("pmf", ""),
+                    capability_info=b.usCapabilityInformation,
                     vendor=vendor,
                     station_count=ie_info.get("station_count", 0),
                     channel_utilization=ie_info.get(

@@ -8,7 +8,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..models import Network, BSSEntry
-from .styles import signal_color, signal_label
+from .styles import security_color, signal_color, signal_label
 
 
 class FilterHeaderView(QHeaderView):
@@ -264,17 +264,7 @@ class NetworkTableWidget(QWidget):
 
     @staticmethod
     def _security_color(sec: str) -> QColor:
-        if "WPA3" in sec or "SAE" in sec:
-            return QColor("#10b981")
-        elif "WPA2" in sec:
-            return QColor("#22c55e")
-        elif "WPA" in sec:
-            return QColor("#f59e0b")
-        elif "WEP" in sec:
-            return QColor("#ef4444")
-        elif sec == "Open":
-            return QColor("#ef4444")
-        return QColor("#e0e0e0")
+        return QColor(security_color(sec))
 
     @staticmethod
     def _util_color(util: float) -> QColor:

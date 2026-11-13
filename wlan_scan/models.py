@@ -21,6 +21,8 @@ class BSSEntry:
     security: str = "Open"
     auth_algo: str = ""
     cipher: str = ""
+    pmf: str = ""  # Protected Management Frames: "Required" / "Capable" / "Disabled" / ""
+    capability_info: int = 0  # beacon Capability Information field (0 = unknown)
     vendor: str = ""
     wifi_generation: str = ""  # "Wi-Fi 4", "Wi-Fi 5", "Wi-Fi 6", "Wi-Fi 6E", "Wi-Fi 7"
     supported_modes: str = ""  # "a/n/ac/ax", "b/g/n/ax", etc.

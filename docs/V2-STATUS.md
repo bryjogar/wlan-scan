@@ -17,7 +17,7 @@ Legend: ✅ done · 🔧 in progress · ⛔ blocked · ⬜ not started
 | Item | State | Notes |
 |---|---|---|
 | R1 IE parser (Wi-Fi 6/7, width) | ✅ | Element 255 parsed as Extension (ext ID = first body byte). Width/centre/primary from HT/VHT/HE (incl. 6 GHz Operation Info)/EHT Operation, clamped by band; caps only set PHY flags. New `BSSEntry.center_channel`; channel map draws the block on it. `wlan_scan/channels.py` is the one freq↔channel module (fixes 6 GHz off-by-one: 5955 MHz was ch 2). Scanners without operation IEs use the standard 5/6 GHz channel plan for the centre. |
-| R2 Security parsing | ⬜ | |
+| R2 Security parsing | ✅ | RSN parsed field-by-field with bounds checks (never raises). Labels: WPA2 (PSK/FT-PSK/PSK-SHA256), WPA3 (SAE/FT-SAE/SAE-EXT-KEY), WPA2/WPA3 (transition), WPA2-/WPA3-Enterprise (Suite-B, or 802.1X-SHA256 + MFPR), OWE (Enhanced Open), Open (OWE transition). PMF from RSN Capabilities → new `BSSEntry.pmf`, shown in the detail panel. WPA1 vendor IE parsed (WPA, WPA/WPA2). WEP from the Capability Privacy bit (new `BSSEntry.capability_info`). One `security_color()` for table + detail panel. |
 | R3 One IE parser | ⬜ | |
 | R4 Max rate | ⬜ | |
 | R5 One vendor lookup | ⬜ | |
@@ -57,6 +57,7 @@ Each needs a run on a real machine before release.
 | Item | Platform | What changed | How to check |
 |---|---|---|---|
 | R1 | Windows x64 (wlanapi) | IEs parsed with the received band; `center_frequency` now MHz (was kHz, detail panel showed "5180000 MHz"); `center_channel` set. | Channel map: an 80 MHz 5 GHz AP on ch 36 spans 36–48; a 2.4 GHz Wi-Fi 6 AP shows 20 MHz; detail panel Center Freq reads e.g. 5180 MHz. |
+| R2 | Windows x64 (wlanapi) | Passes `usCapabilityInformation` to the parser (WEP detection) and fills `pmf`. | Detail panel shows PMF for a WPA3 network ("Required") and a WPA2 one ("Capable"/"Disabled"); a transition-mode SSID reads "WPA2/WPA3". |
 | R1 | macOS | CoreWLAN + airport set `center_channel` (airport from `,+1`/`,-1`, CoreWLAN from the 5/6 GHz plan) and CoreWLAN fills `center_frequency`. | Same channel map check on a Mac. |
 
 ## Plan deviations and findings

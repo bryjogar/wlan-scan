@@ -292,3 +292,17 @@ def signal_label(rssi: int) -> str:
     elif rssi >= -80:
         return "Weak"
     return "Poor"
+
+
+def security_color(sec: str) -> str:
+    """Colour for a security label: green = strong, amber = weak, red = none."""
+    sec = sec or ""
+    if "WPA3" in sec or "OWE (" in sec:
+        return "#10b981"
+    if "WPA2" in sec:
+        return "#22c55e"
+    if "WPA" in sec:
+        return "#f59e0b"
+    if "WEP" in sec or sec.startswith("Open"):
+        return "#ef4444"
+    return "#e0e0e0"

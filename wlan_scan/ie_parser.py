@@ -41,16 +41,16 @@ EXT_HE_OPERATION = 36
 EXT_EHT_OPERATION = 106
 EXT_EHT_CAPABILITIES = 108
 
-# Security: RSN AKM suites
+# RSN AKM suite types (OUI 00-0F-AC), IEEE 802.11-2020 Table 9-151
 AKM_NAMES = {
-    1: "802.1X (WPA2)",
-    2: "PSK (WPA2)",
+    1: "802.1X",
+    2: "PSK",
     3: "FT-802.1X",
     4: "FT-PSK",
     5: "802.1X-SHA256",
     6: "PSK-SHA256",
     7: "TDLS",
-    8: "SAE (WPA3)",
+    8: "SAE",
     9: "FT-SAE",
     10: "AP-PEER-KEY",
     11: "802.1X-Suite-B",
@@ -63,7 +63,17 @@ AKM_NAMES = {
     18: "OWE",
     19: "FT-PSK-SHA384",
     20: "PSK-SHA384",
+    22: "FT-802.1X-SHA384 (EXT)",
+    23: "802.1X-SHA384",
+    24: "SAE-EXT-KEY",
+    25: "FT-SAE-EXT-KEY",
 }
+
+AKM_PSK = {2, 4, 6, 19, 20}
+AKM_SAE = {8, 9, 24, 25}
+AKM_8021X = {1, 3, 5, 14, 15, 16, 17}
+AKM_SUITE_B = {11, 12, 13, 22, 23}
+AKM_OWE = {18}
 
 CIPHER_NAMES_IE = {
     0: "Use Group",
@@ -72,14 +82,26 @@ CIPHER_NAMES_IE = {
     4: "CCMP-128 (AES)",
     5: "WEP-104",
     6: "BIP-CMAC-128",
-    7: "GCMP-128",
-    8: "GCMP-256",
-    9: "CCMP-256",
-    10: "BIP-GMAC-128",
-    11: "BIP-GMAC-256",
-    12: "BIP-CMAC-256",
+    7: "Group addressed traffic not allowed",
+    8: "GCMP-128",
+    9: "GCMP-256",
+    10: "CCMP-256",
+    11: "BIP-GMAC-128",
+    12: "BIP-GMAC-256",
+    13: "BIP-CMAC-256",
 }
 
+# WPA1 (Microsoft vendor IE 00:50:F2 type 1) suite types
+_WPA1_CIPHERS = {0: "Use Group", 1: "WEP-40", 2: "TKIP", 4: "CCMP-128 (AES)", 5: "WEP-104"}
+_WPA1_AKMS = {1: "802.1X", 2: "PSK"}
+
+OUI_IEEE = b"\x00\x0f\xac"
+OUI_MS = b"\x00\x50\xf2"
+OUI_WFA = b"\x50\x6f\x9a"
+WFA_OWE_TRANSITION = 0x1C
+
+#: Capability Information "Privacy" bit (WEP or any RSN/WPA)
+CAP_PRIVACY = 0x0010
 
 def iter_elements(data: bytes):
     """Yield ``(element_id, body)``; extension elements as ``(255, ext_id, body)``.
@@ -134,13 +156,16 @@ _SIX_GHZ_WIDTH = {0: 20, 1: 40, 2: 80, 3: 160}
 _EHT_WIDTH = {0: 20, 1: 40, 2: 80, 3: 160, 4: 320}
 
 
-def parse_information_elements(data: bytes, band: Optional[str] = None) -> dict[str, Any]:
+def parse_information_elements(data: bytes, band: Optional[str] = None,
+                               capability: Optional[int] = None) -> dict[str, Any]:
     """Parse raw 802.11 IEs into a dict.
 
     ``band`` ("2.4 GHz" / "5 GHz" / "6 GHz") comes from the frequency the
     frame was received on; when omitted it is inferred from the IEs.
+    ``capability`` is the beacon's Capability Information field; its
+    Privacy bit identifies WEP when there is no RSN/WPA element.
 
-    Keys: security, auth_algo, cipher, pmf, channel_width, center_channel,
+    Keys: security, auth_algo, cipher, pmf ("Required"/"Capable"/"Disabled"/""), channel_width, center_channel,
     primary_channel, band, station_count, channel_utilization,
     max_rate_mbps, ht_supported, vht_supported, he_supported, eht_supported,
     wifi_generation, supported_modes, phy_type
@@ -172,13 +197,22 @@ def parse_information_elements(data: bytes, band: Optional[str] = None) -> dict[
     he_vht_op = None  # (width, centre) from HE Operation's VHT Operation Information
     six_ghz_op = None  # (primary, width, centre)
     eht_op = None     # (width, centre)
+    rsn = None
+    wpa1 = None
+    owe_transition = False
 
     for eid, body in iter_elements(data):
         if eid == IE_DS_PARAMETER and len(body) >= 1:
             ds_channel = body[0]
 
         elif eid == IE_RSN:
-            _parse_rsn(body, result)
+            rsn = _parse_rsn(body)
+
+        elif eid == IE_VENDOR and len(body) >= 4:
+            if body[:3] == OUI_MS and body[3] == 0x01:
+                wpa1 = _parse_wpa1(body)
+            elif body[:3] == OUI_WFA and body[3] == WFA_OWE_TRANSITION:
+                owe_transition = True
 
         elif eid == IE_HT_CAPABILITIES and len(body) >= 2:
             result["ht_supported"] = True
@@ -243,6 +277,10 @@ def parse_information_elements(data: bytes, band: Optional[str] = None) -> dict[
                 rate = (rate_byte & 0x7F) * 0.5
                 if rate > result["max_rate_mbps"]:
                     result["max_rate_mbps"] = rate
+
+    # ----- security -----
+    privacy = None if capability is None else bool(capability & CAP_PRIVACY)
+    _apply_security(result, rsn, wpa1, privacy, owe_transition)
 
     # ----- band -----
     b = _band_hint(band)
@@ -318,67 +356,148 @@ def _generation(r: dict, band: Optional[str]) -> tuple[str, str, str]:
     return gen, "/".join(modes), phy
 
 
-def _parse_rsn(body: bytes, result: dict) -> None:
-    """Parse RSN (WPA2/WPA3) IE body."""
-    if len(body) < 2:
-        return
-
-    # Version (2 bytes) — skip
-    # Group cipher suite (4 bytes)
-    group_cipher = _oid_to_cipher(body[2:6])
-
-    # Pairwise cipher count (2 bytes)
-    pair_count = body[6] | (body[7] << 8)
-    pairwise_ciphers = []
-    pos = 8
-    for _ in range(pair_count):
-        if pos + 4 > len(body):
-            break
-        pairwise_ciphers.append(_oid_to_cipher(body[pos : pos + 4]))
-        pos += 4
-
-    # AKM count (2 bytes)
-    akm_count = body[pos] | (body[pos + 1] << 8)
+def _read_suites(body: bytes, pos: int) -> tuple[list[bytes], int, bool]:
+    """Read a 2-byte count + that many 4-byte suites. Returns (suites, pos, ok)."""
+    if pos + 2 > len(body):
+        return [], pos, False
+    count = body[pos] | (body[pos + 1] << 8)
     pos += 2
-    akms = []
-    for _ in range(akm_count):
+    suites = []
+    for _ in range(count):
         if pos + 4 > len(body):
-            break
-        suite_id = body[pos : pos + 4]
-        # Suite type is the 4th byte (e.g., 2=PSK, 8=SAE)
-        akm_type = suite_id[3]
-        akms.append(akm_type)
+            return suites, pos, False
+        suites.append(body[pos:pos + 4])
         pos += 4
-
-    # Build security description
-    akm_names = [AKM_NAMES.get(a, f"AKM-{a}") for a in akms]
-    cipher_names = pairwise_ciphers or [group_cipher]
-
-    if any("WPA3" in a for a in akm_names) or any("SAE" in a for a in akm_names):
-        result["security"] = "WPA3"
-    elif any("WPA2" in a for a in akm_names):
-        result["security"] = "WPA2"
-    elif akm_names:
-        result["security"] = akm_names[0]
-
-    result["auth_algo"] = " / ".join(akm_names) if akm_names else ""
-    result["cipher"] = " / ".join(filter(None, cipher_names))
+    return suites, pos, True
 
 
-def _oid_to_cipher(oid: bytes) -> str:
-    """Convert a 4-byte OUI-based cipher suite to a human-readable name."""
-    if len(oid) < 4:
-        return ""
-    suite_type = oid[3]
-    return CIPHER_NAMES_IE.get(suite_type, f"Cipher-{suite_type}")
+def _suite_name(suite: bytes, oui: bytes, table: dict) -> str:
+    if suite[:3] != oui:
+        return f"Vendor-{suite.hex()}"
+    return table.get(suite[3], f"{suite[3]}")
 
+
+def _parse_rsn(body: bytes) -> dict:
+    """RSN element body → {'akms', 'akm_types', 'ciphers', 'group', 'pmf', 'ok'}.
+
+    Every field after the version is optional (802.11-2020 9.4.2.24), so a
+    short element is read as far as it goes and never raises.
+    """
+    out = {"akms": [], "akm_types": set(), "ciphers": [], "group": "",
+           "pmf": "", "ok": False}
+    if len(body) < 2:
+        return out
+    out["ok"] = True
+    pos = 2  # version
+    if pos + 4 <= len(body):
+        out["group"] = _suite_name(body[pos:pos + 4], OUI_IEEE, CIPHER_NAMES_IE)
+        pos += 4
+    else:
+        return out
+    pairwise, pos, ok = _read_suites(body, pos)
+    out["ciphers"] = [_suite_name(c, OUI_IEEE, CIPHER_NAMES_IE) for c in pairwise]
+    if not ok:
+        return out
+    akms, pos, ok = _read_suites(body, pos)
+    for a in akms:
+        out["akms"].append(_suite_name(a, OUI_IEEE, AKM_NAMES))
+        if a[:3] == OUI_IEEE:
+            out["akm_types"].add(a[3])
+    if not ok:
+        return out
+    if pos + 2 <= len(body):
+        caps = body[pos] | (body[pos + 1] << 8)
+        if caps & 0x0040:      # MFPR
+            out["pmf"] = "Required"
+        elif caps & 0x0080:    # MFPC
+            out["pmf"] = "Capable"
+        else:
+            out["pmf"] = "Disabled"
+    return out
+
+
+def _parse_wpa1(body: bytes) -> Optional[dict]:
+    """Vendor element body; returns WPA1 info when it is 00:50:F2 type 1."""
+    if len(body) < 4 or body[:3] != OUI_MS or body[3] != 0x01:
+        return None
+    b = body[4:]
+    out = {"akms": [], "akm_types": set(), "ciphers": [], "group": ""}
+    pos = 2  # version
+    if pos + 4 > len(b):
+        return out
+    out["group"] = _suite_name(b[pos:pos + 4], OUI_MS, _WPA1_CIPHERS)
+    pos += 4
+    pairwise, pos, ok = _read_suites(b, pos)
+    out["ciphers"] = [_suite_name(c, OUI_MS, _WPA1_CIPHERS) for c in pairwise]
+    if ok:
+        akms, pos, _ = _read_suites(b, pos)
+        for a in akms:
+            out["akms"].append(_suite_name(a, OUI_MS, _WPA1_AKMS))
+            if a[:3] == OUI_MS:
+                out["akm_types"].add(a[3])
+    return out
+
+
+def classify_security(rsn: Optional[dict], wpa1: Optional[dict],
+                      privacy: Optional[bool], owe_transition: bool = False) -> str:
+    """Human label from parsed RSN / WPA1 / Privacy bit."""
+    if rsn and rsn.get("ok"):
+        t = rsn["akm_types"]
+        if t & AKM_SUITE_B:
+            return "WPA3-Enterprise"
+        if t & AKM_OWE:
+            return "OWE (Enhanced Open)"
+        sae, psk, dot1x = bool(t & AKM_SAE), bool(t & AKM_PSK), bool(t & AKM_8021X)
+        if dot1x and not (sae or psk):
+            # 802.1X-SHA256 only with PMF required is WPA3-Enterprise (non-192)
+            if t <= {5} and rsn.get("pmf") == "Required":
+                return "WPA3-Enterprise"
+            return "WPA/WPA2-Enterprise" if wpa1 else "WPA2-Enterprise"
+        if sae and psk:
+            return "WPA2/WPA3"
+        if sae:
+            return "WPA3"
+        if psk:
+            return "WPA/WPA2" if wpa1 else "WPA2"
+        if dot1x:
+            return "WPA2-Enterprise"
+        return "WPA2" if not rsn["akms"] else f"RSN ({', '.join(rsn['akms'])})"
+    if wpa1 is not None:
+        return "WPA-Enterprise" if 1 in wpa1["akm_types"] else "WPA"
+    if privacy:
+        return "WEP"
+    if owe_transition:
+        return "Open (OWE transition)"
+    return "Open"
+
+
+def _apply_security(result: dict, rsn, wpa1, privacy, owe_transition) -> None:
+    result["security"] = classify_security(rsn, wpa1, privacy, owe_transition)
+    akms: list[str] = []
+    ciphers: list[str] = []
+    for src in (wpa1, rsn):
+        if not src:
+            continue
+        for a in src["akms"]:
+            if a not in akms:
+                akms.append(a)
+        for c in (src["ciphers"] or ([src["group"]] if src["group"] else [])):
+            if c not in ciphers:
+                ciphers.append(c)
+    if result["security"] == "WEP":
+        ciphers = ["WEP"]
+    result["auth_algo"] = " / ".join(akms)
+    result["cipher"] = " / ".join(ciphers)
+    result["pmf"] = rsn["pmf"] if rsn and rsn.get("ok") else ""
 
 def apply_ies(bss) -> None:
     """Fill a BSSEntry's IE-derived fields from ``bss.ies_raw`` (in place)."""
     if not bss.ies_raw:
         return
-    info = parse_information_elements(bss.ies_raw, bss.band or None)
+    info = parse_information_elements(bss.ies_raw, bss.band or None,
+                                      bss.capability_info or None)
     bss.security = info["security"]
+    bss.pmf = info["pmf"]
     bss.auth_algo = info["auth_algo"]
     bss.cipher = info["cipher"]
     bss.channel_width = info["channel_width"]
