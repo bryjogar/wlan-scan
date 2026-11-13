@@ -16,7 +16,7 @@ Legend: ✅ done · 🔧 in progress · ⛔ blocked · ⬜ not started
 
 | Item | State | Notes |
 |---|---|---|
-| R1 IE parser (Wi-Fi 6/7, width) | ⬜ | |
+| R1 IE parser (Wi-Fi 6/7, width) | ✅ | Element 255 parsed as Extension (ext ID = first body byte). Width/centre/primary from HT/VHT/HE (incl. 6 GHz Operation Info)/EHT Operation, clamped by band; caps only set PHY flags. New `BSSEntry.center_channel`; channel map draws the block on it. `wlan_scan/channels.py` is the one freq↔channel module (fixes 6 GHz off-by-one: 5955 MHz was ch 2). Scanners without operation IEs use the standard 5/6 GHz channel plan for the centre. |
 | R2 Security parsing | ⬜ | |
 | R3 One IE parser | ⬜ | |
 | R4 Max rate | ⬜ | |
@@ -56,6 +56,8 @@ Each needs a run on a real machine before release.
 
 | Item | Platform | What changed | How to check |
 |---|---|---|---|
+| R1 | Windows x64 (wlanapi) | IEs parsed with the received band; `center_frequency` now MHz (was kHz, detail panel showed "5180000 MHz"); `center_channel` set. | Channel map: an 80 MHz 5 GHz AP on ch 36 spans 36–48; a 2.4 GHz Wi-Fi 6 AP shows 20 MHz; detail panel Center Freq reads e.g. 5180 MHz. |
+| R1 | macOS | CoreWLAN + airport set `center_channel` (airport from `,+1`/`,-1`, CoreWLAN from the 5/6 GHz plan) and CoreWLAN fills `center_frequency`. | Same channel map check on a Mac. |
 
 ## Plan deviations and findings
 
@@ -64,3 +66,6 @@ Things in the plan that turned out different in the code, and what was done.
 - **P0.3 CI can't be pushed from here.** GitHub rejects pushes that touch
   `.github/workflows/` without the `workflow` token scope. Workflow files
   are parked in `docs/ci/` for Bryan to move (see `docs/ci/README.md`).
+- **R1:** besides the plan's findings, `scanner.py` stored `ulChCenterFrequency`
+  (kHz) in a field documented as MHz, and its `freq_to_channel` put every
+  6 GHz channel one too high. Both fixed via `channels.py`.

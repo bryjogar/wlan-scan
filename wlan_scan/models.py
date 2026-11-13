@@ -12,10 +12,11 @@ class BSSEntry:
     bssid: str  # MAC address as XX:XX:XX:XX:XX:XX
     ssid: str
     rssi: int  # dBm
-    channel: int
-    channel_width: int = 20  # MHz (20, 40, 80, 160)
+    channel: int  # primary channel
+    channel_width: int = 20  # MHz (20, 40, 80, 160, 320) — operating width
+    center_channel: int = 0  # centre channel of the operating block (0 = same as channel)
     band: str = "2.4 GHz"  # "2.4 GHz", "5 GHz", "6 GHz"
-    center_frequency: int = 0  # MHz (stored as MHz from ulChCenterFrequency / 1000)
+    center_frequency: int = 0  # MHz, centre of the primary 20 MHz channel
     phy_type: str = "Unknown"
     security: str = "Open"
     auth_algo: str = ""

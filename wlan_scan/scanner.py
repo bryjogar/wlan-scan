@@ -16,6 +16,7 @@ from typing import Callable, Optional
 
 from .models import BSSEntry, Network, ScanResult
 from .ie_parser import parse_information_elements
+from .channels import freq_to_channel as _freq_to_channel_mhz
 from .vendor_lookup import lookup_vendor
 
 # ---------------------------------------------------------------------------
@@ -186,27 +187,8 @@ PHY_TYPE_NAMES = {
 
 
 def freq_to_channel(freq_khz: int) -> tuple[int, str]:
-    """Convert center frequency (kHz) to channel number and band."""
-    freq_mhz = freq_khz / 1000.0
-
-    # 2.4 GHz
-    if 2412 <= freq_mhz <= 2484:
-        ch = int((freq_mhz - 2407) / 5)
-        return ch, "2.4 GHz"
-
-    # 5 GHz
-    if 5160 <= freq_mhz <= 5885:
-        ch = int((freq_mhz - 5000) / 5)
-        return ch, "5 GHz"
-
-    # 6 GHz
-    if 5935 <= freq_mhz <= 7115:
-        ch = int((freq_mhz - 5950) / 5) + 1
-        if ch < 1:
-            ch = 1
-        return ch, "6 GHz"
-
-    return 0, "Unknown"
+    """Convert centre frequency (kHz, as wlanapi reports it) to (channel, band)."""
+    return _freq_to_channel_mhz(freq_khz / 1000.0)
 
 
 # ---------------------------------------------------------------------------
@@ -835,7 +817,7 @@ class WiFiScanner:
                         ie_data = b""
 
                 ie_info = (
-                    parse_information_elements(ie_data)
+                    parse_information_elements(ie_data, band)
                     if ie_data else {}
                 )
 
@@ -865,8 +847,9 @@ class WiFiScanner:
                     rssi=b.lRssi,
                     channel=channel,
                     channel_width=channel_width,
+                    center_channel=ie_info.get("center_channel", 0),
                     band=band,
-                    center_frequency=b.ulChCenterFrequency,
+                    center_frequency=b.ulChCenterFrequency // 1000,
                     phy_type=phy,
                     security=security,
                     auth_algo=auth,

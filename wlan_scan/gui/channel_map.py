@@ -15,6 +15,7 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import QWidget, QToolTip
 
 from ..models import Network, BSSEntry
+from ..channels import channel_to_freq
 from .styles import BAND_COLORS, signal_color, signal_label
 
 # Channel map configuration
@@ -174,7 +175,7 @@ class ChannelMapWidget(QWidget):
             rect_data: list[dict] = []  # hold rect info for drawing + label phase
 
             for bss, ssid in all_bss:
-                center_mhz = bss.center_frequency if bss.center_frequency > 0 else _channel_to_freq(bss.channel, self._band)
+                center_mhz = block_center_mhz(bss, self._band)
                 center_mhz = max(freq_start, min(freq_end, center_mhz))
 
                 x_center = self.PADDING_LEFT + ((center_mhz - freq_start) / freq_range) * w
@@ -438,10 +439,15 @@ class ChannelMapWidget(QWidget):
 
 def _channel_to_freq(channel: int, band: str) -> int:
     """Convert channel number to center frequency in MHz."""
-    if band == "2.4 GHz":
-        return 2407 + channel * 5
-    elif band == "5 GHz":
-        return 5000 + channel * 5
-    elif band == "6 GHz":
-        return 5950 + channel * 5
-    return 2407
+    return channel_to_freq(channel, band) or 2407
+
+
+def block_center_mhz(bss: BSSEntry, band: str) -> int:
+    """Centre of the BSS's whole operating block (not just its primary 20 MHz)."""
+    if bss.center_channel and bss.channel_width > 20:
+        f = channel_to_freq(bss.center_channel, bss.band or band)
+        if f:
+            return f
+    if bss.center_frequency > 0:
+        return bss.center_frequency
+    return _channel_to_freq(bss.channel, band)

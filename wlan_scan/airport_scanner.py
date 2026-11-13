@@ -24,6 +24,7 @@ from datetime import datetime
 from typing import Optional
 
 from .models import BSSEntry, Network, ScanResult
+from .channels import standard_center_channel
 from .oui_lookup import lookup_vendor
 
 _AIRPORT = ("/System/Library/PrivateFrameworks/Apple80211.framework/"
@@ -87,6 +88,13 @@ def _channel_width(width: Optional[str]) -> int:
         return 20
 
 
+def _center_channel(channel: int, width: int, band: str, raw: Optional[str]) -> int:
+    """Centre of the operating block. ',+1' / ',-1' give the secondary side."""
+    if width == 40 and raw in (",+1", ",-1"):
+        return channel + 2 if raw == ",+1" else channel - 2
+    return standard_center_channel(channel, width, band)
+
+
 def _band(channel: int, width: int) -> str:
     if channel <= 14:
         return "2.4 GHz"
@@ -137,6 +145,7 @@ def parse_airport_output(output: str, interface: str = "") -> ScanResult:
         rssi = int(m.group("rssi"))
         channel = int(m.group("channel"))
         width = _channel_width(m.group("width"))
+        band = _band(channel, width)
         security, auth = _security(m.group("security"))
 
         entry = BSSEntry(
@@ -145,7 +154,8 @@ def parse_airport_output(output: str, interface: str = "") -> ScanResult:
             rssi=rssi,
             channel=channel,
             channel_width=width,
-            band=_band(channel, width),
+            center_channel=_center_channel(channel, width, band, m.group("width")),
+            band=band,
             security=security,
             auth_algo=auth,
             vendor=lookup_vendor(bssid),

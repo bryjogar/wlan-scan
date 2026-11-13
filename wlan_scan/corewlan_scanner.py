@@ -19,6 +19,7 @@ from datetime import datetime
 from typing import Callable, Optional
 
 from .models import BSSEntry, Network, ScanResult
+from .channels import channel_to_freq, standard_center_channel
 from .oui_lookup import lookup_vendor
 
 # CWChannelWidth values (CoreWLAN)
@@ -160,8 +161,9 @@ def scan(interface: str = "", debug: Optional[Callable[[str], None]] = None) -> 
                 rssi=rssi,
                 channel=ch_num,
                 channel_width=width,
+                center_channel=standard_center_channel(ch_num, width, band),
                 band=band,
-                center_frequency=0,
+                center_frequency=channel_to_freq(ch_num, band),
                 security=security,
                 auth_algo=auth,
                 vendor=lookup_vendor(bssid),
