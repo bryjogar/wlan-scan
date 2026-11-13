@@ -69,25 +69,12 @@ def run_cli(args):
         rec.close()
 
     if args.export:
-        import csv
         from datetime import datetime
+        from wlan_scan.export import write_scan_csv
+
         path = f"wifi_scan_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-        with open(path, "w", newline="", encoding="utf-8") as f:
-            writer = csv.writer(f)
-            writer.writerow([
-                "SSID", "BSSID", "RSSI", "Channel", "Band", "Channel Width",
-                "Security", "PHY", "Vendor", "Max Rate", "Utilization", "Clients",
-            ])
-            for net in result.networks:
-                for bss in net.bss_list:
-                    writer.writerow([
-                        net.ssid, bss.bssid, bss.rssi, bss.channel, bss.band,
-                        bss.channel_width, bss.security, bss.phy_type, bss.vendor,
-                        f"{bss.max_rate:.0f}",
-                        f"{bss.channel_utilization:.1f}" if bss.channel_utilization else "",
-                        bss.station_count if bss.station_count else "",
-                    ])
-        print(f"Exported to: {path}")
+        n = write_scan_csv(result, path)
+        print(f"Exported {n} BSS entries from one scan to: {path}")
 
     # Print summary
     total_bss = sum(len(n.bss_list) for n in result.networks)

@@ -19,6 +19,7 @@ from ..backends import candidate_backends, open_first
 from ..recording import ScanRecorder
 from ..scan_cycle import RateMeter
 from ..connection import default_gateway
+from ..export import write_scan_csv
 from ..corewlan_scanner import LocationPermissionRequired
 from .background import run_in_background
 from ..logging_setup import get_logger
@@ -471,6 +472,7 @@ class MainWindow(QMainWindow):
 
         toolbar.addSeparator()
         export_action = QAction("Export CSV", self)
+        export_action.setToolTip("Save the latest scan as CSV")
         export_action.triggered.connect(self._export_csv)
         toolbar.addAction(export_action)
 
@@ -960,13 +962,12 @@ class MainWindow(QMainWindow):
             self._bssid_track_status.setStyleSheet("color: #ef4444; font-size: 11px;")
 
     def _export_csv(self):
-        """Export current scan results to CSV via save dialog."""
+        """Export the latest scan to CSV via a save dialog."""
         if not self._last_result:
             QMessageBox.information(self, "Export", "No scan data to export.")
             return
 
         from pathlib import Path
-        import csv
         from datetime import datetime
 
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -984,26 +985,11 @@ class MainWindow(QMainWindow):
 
         path = Path(path_str)
         try:
-            with open(path, "w", newline="", encoding="utf-8") as f:
-                writer = csv.writer(f)
-                writer.writerow([
-                    "SSID", "BSSID", "RSSI", "Channel", "Band", "Channel Width",
-                    "Security", "PHY", "Vendor", "Max Rate (Mbps)",
-                    "Channel Utilization %", "Clients", "Center Freq (MHz)",
-                ])
-                for net in self._last_result.networks:
-                    for bss in net.bss_list:
-                        writer.writerow([
-                            net.ssid, bss.bssid, bss.rssi, bss.channel,
-                            bss.band, bss.channel_width,
-                            bss.security, bss.phy_type, bss.vendor or "",
-                            f"{bss.max_rate:.1f}" if bss.max_rate > 0 else "",
-                            f"{bss.channel_utilization:.1f}" if bss.channel_utilization > 0 else "",
-                            bss.station_count if bss.station_count > 0 else "",
-                            bss.center_frequency if bss.center_frequency > 0 else "",
-                        ])
-
-            QMessageBox.information(self, "Export", f"Exported {self._scan_count} scans to:\n{path}")
+            n = write_scan_csv(self._last_result, path)
+            QMessageBox.information(
+                self, "Export",
+                f"Exported {n} BSS entries from the latest scan "
+                f"({self._last_result.timestamp:%H:%M:%S}) to:\n{path}")
         except OSError as e:
             QMessageBox.critical(self, "Export Error", str(e))
 
