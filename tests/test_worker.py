@@ -1,6 +1,8 @@
 """ScannerWorker drives a ReplayBackend headless."""
 
-from conftest import FIXTURES
+from conftest import FIXTURES, need_qt
+
+need_qt()
 
 
 def test_worker_replays_fixture(qtbot):
