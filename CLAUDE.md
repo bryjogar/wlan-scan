@@ -1,8 +1,9 @@
 # CLAUDE.md — wlan-scan
 
-Project rules for **WLAN Scan**. Bryan's house rules (`~/Repos/app-template/CLAUDE.md`) and the
-desktop-app conventions (`~/Repos/app-template/DESKTOP-APPS.md`) govern everything not stated
-here. When this file and those disagree, this file wins for this repo; flag the conflict to Bryan.
+Project rules for **WLAN Scan**. Bryan's house rules (`~/Repos/app-template/CLAUDE.md`) govern
+everything not stated here. When this file and those disagree, this file wins for this repo;
+flag the conflict to Bryan. The desktop-app conventions (`app-template/DESKTOP-APPS.md`) are on
+hold while Bryan reconsiders desktop apps (2026-11-14): don't apply them here without asking.
 
 ## What this is
 
