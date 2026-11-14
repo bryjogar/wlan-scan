@@ -2,8 +2,9 @@
 
 Project rules for **WLAN Scan**. Bryan's house rules (`~/Repos/app-template/CLAUDE.md`) govern
 everything not stated here. When this file and those disagree, this file wins for this repo;
-flag the conflict to Bryan. The desktop-app conventions (`app-template/DESKTOP-APPS.md`) are on
-hold while Bryan reconsiders desktop apps (2026-11-14): don't apply them here without asking.
+flag the conflict to Bryan. New desktop apps are Rust + Tauri (app-template, Project types,
+tier 3); this app stays Python/PySide6 as it is. `app-template/DESKTOP-APPS.md` describes its
+Python-era setup; don't retrofit it to that without asking.
 
 ## What this is
 
