@@ -223,3 +223,14 @@ def test_heat_settings_saved(tab, tmp_path):
     back = P.load(tmp_path / "s.wlansurvey")
     assert back.settings["heatmap"]["opacity"] == 35
     assert back.settings["heatmap"]["metric"] == "cochannel"
+
+
+def test_idw_neighbors_limits_influence():
+    pts, vals = [(0, 5), (20, 5), (1000, 5)], [0.0, 0.0, 100.0]
+    glob = H.idw_grid(pts, vals, 1000, 10, cell=10)
+    local = H.idw_grid(pts, vals, 1000, 10, cell=10, neighbors=2)
+    assert glob.value_at(10, 5) > 0                  # the far point still pulls
+    assert local.value_at(10, 5) == 0                # only the two nearest count
+    assert local.value_at(995, 5) == pytest.approx(100, abs=0.5)
+    same = H.idw_grid(pts, vals, 1000, 10, cell=10, neighbors=3)
+    assert np.allclose(same.values, glob.values)     # k ≥ points = plain IDW

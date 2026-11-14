@@ -69,9 +69,11 @@ def _centres(n: int, cell: float, size: float) -> np.ndarray:
 def idw_grid(xy: Sequence[tuple[float, float]], values: Sequence[float],
              width: int, height: int, power: float = 2.0,
              boundary: Optional[Sequence[tuple[float, float]]] = None,
-             cell: Optional[float] = None) -> Grid:
+             cell: Optional[float] = None, neighbors: Optional[int] = None) -> Grid:
     """Inverse-distance-weighted surface. A cell centre that coincides with
-    a sample takes its value exactly."""
+    a sample takes its value exactly. With ``neighbors``, each cell uses only
+    its that-many nearest samples (local IDW: far-away points don't pull every
+    cell toward the survey's average)."""
     cell = cell or cell_size(width, height)
     cols = max(1, int(np.ceil(width / cell)))
     rows = max(1, int(np.ceil(height / cell)))
@@ -94,6 +96,9 @@ def idw_grid(xy: Sequence[tuple[float, float]], values: Sequence[float],
         with np.errstate(divide="ignore"):
             w = 1.0 / np.power(d2, power / 2.0)
         w[exact] = 0.0
+        if neighbors and len(pts) > neighbors:
+            kth = np.partition(d2, neighbors - 1, axis=1)[:, neighbors - 1:neighbors]
+            w[d2 > kth] = 0.0
         res = (w @ vals) / w.sum(axis=1)
         hit = exact.any(axis=1)
         if hit.any():
@@ -165,7 +170,8 @@ def floor_heatmap(project, floor, spec: HeatmapSpec) -> FloorHeatmap:
     grid = None
     if vals and w > 0 and h > 0:
         grid = idw_grid(xy, list(vals.values()), w, h,
-                        float(s.get("idw_power", 2.0)), boundary or None)
+                        float(s.get("idw_power", 2.0)), boundary or None,
+                        neighbors=int(s.get("idw_neighbors", 0)) or None)
     return FloorHeatmap(grid, ramp, boundary, vals, auto)
 
 

@@ -39,6 +39,7 @@ DEFAULT_SETTINGS = {
     "thresholds": [-67, -70, -80],   # voice / data / edge (dBm)
     "coverage_dbm": -67,              # "APs >= x dBm" metric
     "idw_power": 2.0,
+    "idw_neighbors": 8,               # 0 = use every point for every cell
     "boundary_margin_ft": 10.0,
 }
 
