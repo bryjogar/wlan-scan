@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from PySide6.QtCore import QPointF, QRectF, Qt, Signal
+from PySide6.QtCore import QPoint, QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QBrush, QColor, QPainter, QPen, QPixmap, QPolygonF
 from PySide6.QtWidgets import (QGraphicsLineItem, QGraphicsPixmapItem, QGraphicsPolygonItem,
                                QGraphicsScene, QGraphicsView)
@@ -34,6 +34,8 @@ class PlanView(QGraphicsView):
     ap_place_clicked = Signal(float, float)
     boundary_drawn = Signal(list)
     zoom_changed = Signal(float)
+    item_menu = Signal(str, QPoint)   # right-click on a tagged item (data(0) = id)
+    walk_cancelled = Signal()         # Esc in walk mode
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -206,7 +208,25 @@ class PlanView(QGraphicsView):
             return
         super().mouseReleaseEvent(event)
 
+    def item_id_at(self, view_pos) -> str:
+        """``data(0)`` id of the topmost tagged item under a viewport position."""
+        for it in self.items(view_pos):
+            tag = it.data(0)
+            if isinstance(tag, str) and tag:
+                return tag
+        return ""
+
+    def contextMenuEvent(self, event):
+        tag = self.item_id_at(event.pos())
+        if tag:
+            self.item_menu.emit(tag, event.globalPos())
+            event.accept()
+            return
+        super().contextMenuEvent(event)
+
     def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Escape and self._tool == "walk":
+            self.walk_cancelled.emit()
         if event.key() == Qt.Key.Key_Escape:
             self._cancel_drawing()
             event.accept()

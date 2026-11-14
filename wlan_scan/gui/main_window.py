@@ -11,7 +11,7 @@ from PySide6.QtGui import QFont, QAction, QKeySequence, QIcon
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSplitter,
     QPushButton, QStatusBar, QLabel, QComboBox, QCheckBox, QMessageBox,
-    QFileDialog, QApplication,
+    QFileDialog, QApplication, QTabWidget,
 )
 
 from ..models import Network, ScanResult
@@ -32,6 +32,7 @@ from .bssid_tracker import BSSIDTracker
 from .ping_dialog import PingDialog
 from .neighbor_dialog import NeighborDialog
 from .speedtest_dialog import SpeedtestDialog
+from .survey_tab import SurveyTab
 
 
 class UpdateAvailableEvent(QEvent):
@@ -263,8 +264,15 @@ class MainWindow(QMainWindow):
         return QIcon()  # fallback — blank icon
 
     def _setup_ui(self):
+        self._tabs = QTabWidget()
+        self._tabs.setDocumentMode(True)
+        self.setCentralWidget(self._tabs)
         central = QWidget()
-        self.setCentralWidget(central)
+        self._tabs.addTab(central, "Scanner")
+        self._survey_tab = SurveyTab()
+        self._survey_tab.scan_needed.connect(self._survey_scan_needed)
+        self._survey_tab.continuous_needed.connect(self._survey_continuous_needed)
+        self._tabs.addTab(self._survey_tab, "Survey")
         main_layout = QVBoxLayout(central)
         main_layout.setContentsMargins(8, 8, 8, 8)
         main_layout.setSpacing(6)
@@ -670,6 +678,7 @@ class MainWindow(QMainWindow):
     @Slot(object)
     def _on_scan_complete(self, result: ScanResult):
         self._last_result = result
+        self._survey_tab.on_scan_result(result)
         self._scan_count += 1
         elapsed = (datetime.now() - self._start_time).seconds
 
@@ -743,6 +752,29 @@ class MainWindow(QMainWindow):
     @Slot()
     def _on_scan_started(self):
         self._status_scan.setText("Scanning...")
+        self._survey_tab.on_scan_started()
+
+    # ── Survey tab requests ──
+
+    def _survey_scan_needed(self):
+        """Point mode wants another scan: take one now if scanning is paused
+        or stopped; with Auto-scan on, the next interval scan serves."""
+        w = self._worker
+        if self._stopping:
+            return
+        if not w.isRunning():
+            self._start_scanning()
+        elif w.paused:
+            w.scan_once()
+        self._update_scan_button()
+
+    def _survey_continuous_needed(self):
+        """Walk mode needs a steady stream of scans: turn Auto-scan on."""
+        if not self._auto_scan_cb.isChecked():
+            self._auto_scan_cb.setChecked(True)
+        if not self._worker.isRunning() and not self._stopping:
+            self._start_scanning()
+        self._update_scan_button()
 
     # ── Filtering / refresh ──
 
@@ -996,6 +1028,9 @@ class MainWindow(QMainWindow):
     # ── Window management ──
 
     def closeEvent(self, event):
+        if not self._survey_tab.maybe_save():
+            event.ignore()
+            return
         if hasattr(self, '_worker') and self._worker.isRunning():
             self._worker.stop()  # interrupts a scan in progress
             self._worker.wait(5000)

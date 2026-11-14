@@ -24,3 +24,6 @@ Thumbs.db
 # Coverage
 .coverage
 htmlcov/
+
+# Vendor lookup cache (runtime)
+.oui_cache/
