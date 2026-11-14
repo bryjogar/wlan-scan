@@ -1,4 +1,5 @@
 PySide6>=6.6
+numpy>=1.24
 pyinstaller>=6.0
 pyobjc-framework-CoreWLAN>=10.0; sys_platform == 'darwin'
 pyobjc-framework-CoreLocation>=10.0; sys_platform == 'darwin'

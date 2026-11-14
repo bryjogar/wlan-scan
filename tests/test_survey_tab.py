@@ -74,7 +74,10 @@ def test_point_mode_takes_n_scans(tab, scans):
     assert len(tab.project.samples_for(p.id)) == 3
     assert asked == [1, 1, 1]          # one more after each scan until done
     it = tab._items[p.id]
-    assert it.progress is None and it.color == "#22c55e"   # strong signal at the AP
+    from wlan_scan.survey.metrics import ramp_for
+    assert it.progress is None
+    assert it.color == ramp_for("best_rssi").hex(tab.point_value(p.id))
+    assert tab.point_value(p.id) > -50                    # strong signal at the AP
     assert "3 scan(s)" in it.toolTip()
     # A click during capture is refused, not queued.
     tab.view.click_at(QPointF(300, 300))

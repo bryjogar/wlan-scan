@@ -13,18 +13,21 @@ from typing import Callable, Optional
 
 from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QBrush, QColor, QPainter, QPen, QPixmap
-from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QFileDialog,
-                               QGraphicsItem, QHBoxLayout, QInputDialog, QLabel, QMenu,
-                               QMessageBox, QPushButton, QSpinBox, QToolButton, QVBoxLayout,
-                               QWidget)
+from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QFileDialog, QFormLayout,
+                               QGraphicsItem, QGroupBox, QHBoxLayout, QInputDialog, QLabel,
+                               QListWidget, QListWidgetItem, QMenu, QMessageBox, QPushButton,
+                               QScrollArea, QSlider, QSpinBox, QSplitter, QToolButton,
+                               QVBoxLayout, QWidget)
 
 from ..logging_setup import get_logger
 from ..survey import geometry as G
 from ..survey import plan_import as PI
 from ..survey import project as P
 from ..survey.capture import PointCapture, WalkSession
-from ..survey.metrics import best_rssi, rssi_color
+from ..survey import heatmap as H
+from ..survey.metrics import METRICS, Filter, point_metric
 from .background import run_in_background
+from .heatmap_widgets import LegendWidget, grid_pixmap
 from .plan_view import PlanView
 from .survey_dialogs import CalibrateDialog, import_plan
 
@@ -32,6 +35,9 @@ log = get_logger("survey")
 
 POINT_RADIUS = 9.0   # screen pixels (points ignore the view's zoom)
 AUTOSAVE_MS = 60_000
+BANDS = ("All bands", "2.4 GHz", "5 GHz", "6 GHz")
+DEFAULT_HEATMAP = {"show": True, "metric": "best_rssi", "ssids": [], "band": "",
+                   "bssid": "", "opacity": 60, "labels": False}
 FILE_FILTER = f"WLAN surveys (*{P.SUFFIX});;All files (*)"
 
 
@@ -95,6 +101,9 @@ class SurveyTab(QWidget):
         self._items: dict[str, PointItem] = {}
         self._overlay: list = []
         self._recovery_checked = False
+        self._heat_item = None
+        self._boundary_item = None
+        self.heat: Optional[H.FloorHeatmap] = None
         # Hooks so tests can answer dialogs.
         self.ask: Callable[[str, str], bool] = self._ask_yes_no
         self.ask_save: Callable[[], Optional[bool]] = self._ask_save
@@ -107,6 +116,10 @@ class SurveyTab(QWidget):
         self._autosave.setInterval(AUTOSAVE_MS)
         self._autosave.timeout.connect(self.autosave_now)
         self._autosave.start()
+        self._heat_timer = QTimer(self)
+        self._heat_timer.setSingleShot(True)
+        self._heat_timer.setInterval(120)
+        self._heat_timer.timeout.connect(self.refresh_heatmap)
         self._sync_all()
 
     # ------------------------------------------------------------------ UI
@@ -214,12 +227,104 @@ class SurveyTab(QWidget):
         self.view.walk_clicked.connect(self.on_walk_clicked)
         self.view.walk_cancelled.connect(lambda: self.set_tool("pan"))
         self.view.calibration_line.connect(self._on_calibration_line)
+        self.view.boundary_drawn.connect(self.set_boundary)
         self.view.item_menu.connect(self._on_item_menu)
-        lay.addWidget(self.view, 1)
+        split = QSplitter(Qt.Orientation.Horizontal)
+        split.addWidget(self.view)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(self._build_heat_panel())
+        scroll.setMinimumWidth(290)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        split.addWidget(scroll)
+        split.setStretchFactor(0, 1)
+        split.setSizes([900, 290])
+        lay.addWidget(split, 1)
 
         self.status = QLabel("")
         self.status.setStyleSheet("color: #9ca3af; padding: 2px 4px;")
         lay.addWidget(self.status)
+
+    def _build_heat_panel(self) -> QWidget:
+        panel = QWidget()
+        v = QVBoxLayout(panel)
+        v.setContentsMargins(4, 0, 4, 0)
+        box = QGroupBox("Heatmap")
+        form = QFormLayout(box)
+        self.show_heat_cb = QCheckBox("Show heatmap")
+        self.show_heat_cb.toggled.connect(lambda on: self._set_heat("show", bool(on)))
+        form.addRow(self.show_heat_cb)
+        self.metric_combo = QComboBox()
+        self.metric_combo.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.metric_combo.setMinimumContentsLength(14)
+        for key, info in METRICS.items():
+            self.metric_combo.addItem(info.label, key)
+        self.metric_combo.currentIndexChanged.connect(
+            lambda _i: self._set_heat("metric", self.metric_combo.currentData()))
+        form.addRow("Metric:", self.metric_combo)
+        self.bssid_combo = QComboBox()
+        self.bssid_combo.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.bssid_combo.setMinimumContentsLength(14)
+        self.bssid_combo.currentIndexChanged.connect(
+            lambda _i: self._set_heat("bssid", self.bssid_combo.currentData() or ""))
+        form.addRow("BSSID:", self.bssid_combo)
+        self.band_combo = QComboBox()
+        self.band_combo.addItems(list(BANDS))
+        self.band_combo.currentTextChanged.connect(
+            lambda t: self._set_heat("band", "" if t == BANDS[0] else t))
+        form.addRow("Band:", self.band_combo)
+        self.ssid_list = QListWidget()
+        self.ssid_list.setMaximumHeight(130)
+        self.ssid_list.setToolTip("Tick SSIDs to include. None ticked = all networks.")
+        self.ssid_list.itemChanged.connect(self._on_ssid_item)
+        form.addRow("SSIDs:", self.ssid_list)
+        self.opacity_slider = QSlider(Qt.Orientation.Horizontal)
+        self.opacity_slider.setRange(5, 100)
+        self.opacity_slider.valueChanged.connect(lambda val: self._set_heat("opacity", int(val)))
+        form.addRow("Opacity:", self.opacity_slider)
+        self.labels_cb = QCheckBox("Point labels")
+        self.labels_cb.toggled.connect(lambda on: self._set_heat("labels", bool(on)))
+        form.addRow(self.labels_cb)
+        v.addWidget(box)
+
+        tbox = QGroupBox("Thresholds (dBm)")
+        tf = QFormLayout(tbox)
+        self.thr_spins = []
+        for i, name in enumerate(("Voice", "Data", "Edge")):
+            sp = QSpinBox()
+            sp.setRange(-100, -30)
+            sp.valueChanged.connect(self._on_thresholds)
+            tf.addRow(f"{name}:", sp)
+            self.thr_spins.append(sp)
+        self.cov_spin = QSpinBox()
+        self.cov_spin.setRange(-100, -30)
+        self.cov_spin.setToolTip("Signal an AP must reach to count for coverage overlap")
+        self.cov_spin.valueChanged.connect(lambda val: self._set_setting("coverage_dbm", int(val),
+                                                                         heat=True))
+        tf.addRow("Overlap ≥:", self.cov_spin)
+        v.addWidget(tbox)
+
+        bbox = QGroupBox("Survey boundary")
+        bl = QVBoxLayout(bbox)
+        self.boundary_lbl = QLabel("")
+        self.boundary_lbl.setWordWrap(True)
+        bl.addWidget(self.boundary_lbl)
+        row = QHBoxLayout()
+        self.draw_boundary_btn = self._btn("Draw…", "Click the outline's corners on the plan; "
+                                           "double-click or Enter to finish, Esc to cancel",
+                                           lambda: self.set_tool("boundary"))
+        row.addWidget(self.draw_boundary_btn)
+        row.addWidget(self._btn("Auto", "Use the points' outline plus a margin",
+                                lambda: self.set_boundary(None)))
+        bl.addLayout(row)
+        v.addWidget(bbox)
+
+        self.legend = LegendWidget()
+        v.addWidget(self.legend)
+        v.addStretch()
+        return panel
 
     # ------------------------------------------------------------- dialogs
 
@@ -248,6 +353,7 @@ class SurveyTab(QWidget):
         self.dirty = True
         self.project.touch()
         self._sync_status()
+        self._heat_timer.start()
         self.project_changed.emit()
 
     def maybe_save(self) -> bool:
@@ -480,16 +586,18 @@ class SurveyTab(QWidget):
     def set_tool(self, tool: str) -> None:
         if tool != "walk":
             self._stop_walk()
-        if tool in ("point", "walk") and self.floor is None:
+        if tool in ("point", "walk", "boundary", "calibrate") and self.floor is None:
             self._flash("Import a floor plan first (+ Floor plan…)")
             tool = "pan"
         self.view.set_tool(tool)
         b = self.tool_buttons.get(tool)
         if b:
             b.setChecked(True)
-        elif tool == "calibrate":
+        else:
+            self.tool_group.setExclusive(False)
             for btn in self.tool_buttons.values():
                 btn.setChecked(False)
+            self.tool_group.setExclusive(True)
         if tool != "calibrate" and self.cal_btn.isChecked():
             self.cal_btn.blockSignals(True)
             self.cal_btn.setChecked(False)
@@ -676,7 +784,7 @@ class SurveyTab(QWidget):
     # -------------------------------------------------------------- display
 
     def point_value(self, point_id: str) -> Optional[float]:
-        return best_rssi(self.project.samples_for(point_id))
+        return point_metric(self.project.samples_for(point_id), "best_rssi")
 
     def point_summary(self, point_id: str) -> str:
         p = self.project.point(point_id)
@@ -716,10 +824,18 @@ class SurveyTab(QWidget):
         it = self._items.get(point_id)
         if it is None:
             return
-        thresholds = tuple(self.project.settings.get("thresholds", (-67, -70, -80)))
         c = self.capture
         progress = c.got / c.needed if c is not None and c.point_id == point_id else None
-        it.set_state(rssi_color(self.point_value(point_id), thresholds), progress)
+        spec = self.heat_spec()
+        s = self.project.settings
+        ramp = H.ramp_for(spec.metric, s.get("thresholds", (-67, -70, -80)),
+                          int(s.get("coverage_dbm", -67)))
+        v = point_metric(self.project.samples_for(point_id), spec.metric, spec.flt,
+                         int(s.get("coverage_dbm", -67)))
+        label = ""
+        if self.heat_settings().get("labels") and v is not None:
+            label = f"{v:.0f}"
+        it.set_state(ramp.hex(v), progress, label)
         it.setToolTip(self.point_summary(point_id))
 
     def _sync_plan(self) -> None:
@@ -736,6 +852,8 @@ class SurveyTab(QWidget):
                 self._add_item(p)
         self._draw_walk_line()
         self._sync_status()
+        self._sync_filter_lists(force=True)
+        self.refresh_heatmap()
 
     def _sync_floors(self) -> None:
         self.floor_combo.blockSignals(True)
@@ -760,12 +878,172 @@ class SurveyTab(QWidget):
                 w.setValue(v)
             w.blockSignals(False)
         self._sync_floors()
+        self._sync_heat_controls()
         self._sync_plan()
 
-    def _set_setting(self, key: str, value) -> None:
+    def _set_setting(self, key: str, value, heat: bool = False) -> None:
         if self.project.settings.get(key) != value:
             self.project.settings[key] = value
             self.mark_dirty()
+            if heat:
+                self._refresh_point_items()
+
+    # -------------------------------------------------------------- heatmap
+
+    def heat_settings(self) -> dict:
+        hs = self.project.settings.get("heatmap")
+        if not isinstance(hs, dict):
+            hs = self.project.settings["heatmap"] = {}
+        for k, v in DEFAULT_HEATMAP.items():
+            hs.setdefault(k, list(v) if isinstance(v, list) else v)
+        return hs
+
+    def heat_spec(self) -> H.HeatmapSpec:
+        hs = self.heat_settings()
+        return H.HeatmapSpec(hs["metric"], Filter(set(hs["ssids"]) or None,
+                                                   hs["band"] or None, hs["bssid"]))
+
+    def _set_heat(self, key: str, value) -> None:
+        hs = self.heat_settings()
+        if hs.get(key) == value:
+            return
+        hs[key] = value
+        if key == "metric":
+            self.bssid_combo.setEnabled(value == "bssid_rssi")
+        self.mark_dirty()
+        if key in ("metric", "ssids", "band", "bssid", "labels"):
+            self._refresh_point_items()
+
+    def _on_ssid_item(self, _item) -> None:
+        ticked = [self.ssid_list.item(i).data(Qt.ItemDataRole.UserRole)
+                  for i in range(self.ssid_list.count())
+                  if self.ssid_list.item(i).checkState() == Qt.CheckState.Checked]
+        self._set_heat("ssids", sorted(ticked))
+
+    def _on_thresholds(self) -> None:
+        vals = sorted((sp.value() for sp in self.thr_spins), reverse=True)
+        self._set_setting("thresholds", vals, heat=True)
+
+    def _sync_heat_controls(self) -> None:
+        hs = self.heat_settings()
+        s = self.project.settings
+        widgets = [self.show_heat_cb, self.metric_combo, self.band_combo, self.opacity_slider,
+                   self.labels_cb, self.cov_spin, *self.thr_spins]
+        for w in widgets:
+            w.blockSignals(True)
+        self.show_heat_cb.setChecked(bool(hs["show"]))
+        self.metric_combo.setCurrentIndex(max(0, self.metric_combo.findData(hs["metric"])))
+        self.band_combo.setCurrentText(hs["band"] or BANDS[0])
+        self.opacity_slider.setValue(int(hs["opacity"]))
+        self.labels_cb.setChecked(bool(hs["labels"]))
+        self.cov_spin.setValue(int(s.get("coverage_dbm", -67)))
+        for sp, val in zip(self.thr_spins, sorted(s.get("thresholds", (-67, -70, -80)),
+                                                  reverse=True)):
+            sp.setValue(int(val))
+        for w in widgets:
+            w.blockSignals(False)
+        self.bssid_combo.setEnabled(hs["metric"] == "bssid_rssi")
+        self._sync_filter_lists(force=True)
+
+    def _floor_readings(self):
+        ids = {p.id for p in self.project.points_on(self.floor_id)}
+        for smp in self.project.samples:
+            if smp.point_id in ids:
+                yield from smp.readings
+
+    def _sync_filter_lists(self, force: bool = False) -> None:
+        hs = self.heat_settings()
+        ssids, bssids = set(hs["ssids"]), {}
+        for r in self._floor_readings():
+            if r.ssid:
+                ssids.add(r.ssid)
+            if r.bssid not in bssids or (r.ssid and not bssids[r.bssid]):
+                bssids[r.bssid] = r.ssid
+        if hs["bssid"]:
+            bssids.setdefault(hs["bssid"], "")
+        have_s = [self.ssid_list.item(i).data(Qt.ItemDataRole.UserRole)
+                  for i in range(self.ssid_list.count())]
+        if force or sorted(ssids) != have_s:
+            self.ssid_list.blockSignals(True)
+            self.ssid_list.clear()
+            for name in sorted(ssids):
+                it = QListWidgetItem(name)
+                it.setData(Qt.ItemDataRole.UserRole, name)
+                it.setFlags(it.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                it.setCheckState(Qt.CheckState.Checked if name in hs["ssids"]
+                                 else Qt.CheckState.Unchecked)
+                self.ssid_list.addItem(it)
+            self.ssid_list.blockSignals(False)
+        have_b = [self.bssid_combo.itemData(i) for i in range(self.bssid_combo.count())]
+        want_b = sorted(bssids, key=lambda b: (bssids[b].lower(), b))
+        if force or want_b != have_b:
+            self.bssid_combo.blockSignals(True)
+            self.bssid_combo.clear()
+            for b in want_b:
+                self.bssid_combo.addItem(f"{bssids[b] or '(hidden)'} — {b}", b)
+            i = self.bssid_combo.findData(hs["bssid"])
+            if i < 0 and want_b:
+                i = 0
+                hs["bssid"] = want_b[0]
+            self.bssid_combo.setCurrentIndex(i)
+            self.bssid_combo.blockSignals(False)
+
+    def _refresh_point_items(self) -> None:
+        for pid in self._items:
+            self._update_item(pid)
+
+    def set_boundary(self, pts) -> None:
+        f = self.floor
+        if f is None:
+            return
+        f.boundary = [tuple(map(float, p)) for p in pts] if pts else None
+        if self.view.tool == "boundary":
+            self.set_tool("pan")
+        self.mark_dirty()
+        self.refresh_heatmap()
+
+    def refresh_heatmap(self) -> None:
+        """Recompute the floor's heatmap and redraw the layer."""
+        self._heat_timer.stop()
+        sc = self.view.scene()
+        for attr in ("_heat_item", "_boundary_item"):
+            it = getattr(self, attr)
+            if it is not None:
+                sc.removeItem(it)
+                setattr(self, attr, None)
+        f = self.floor
+        if f is None:
+            self.heat = None
+            self.legend.set_ramp(None, "")
+            self.boundary_lbl.setText("")
+            return
+        self._sync_filter_lists()
+        hs = self.heat_settings()
+        self.heat = H.floor_heatmap(self.project, f, self.heat_spec())
+        info = METRICS[hs["metric"]]
+        self.legend.set_ramp(self.heat.ramp, info.label)
+        n = len(self.heat.point_values)
+        self.boundary_lbl.setText(
+            ("Auto: points' outline + margin" if self.heat.auto_boundary else
+             f"Drawn ({len(f.boundary)} corners)")
+            + f". {n} point(s) with data for this metric.")
+        if not hs["show"]:
+            return
+        if self.heat.grid is not None:
+            from .heatmap_widgets import grid_image
+            img = grid_image(self.heat.grid, self.heat.ramp, hs["opacity"] / 100.0)
+            item = sc.addPixmap(QPixmap.fromImage(img))
+            item.setTransformationMode(Qt.TransformationMode.SmoothTransformation)
+            item.setScale(self.heat.grid.cell)
+            item.setZValue(-50)
+            self._heat_item = item
+        if len(self.heat.boundary) >= 3:
+            from PySide6.QtGui import QPolygonF
+            pen = QPen(QColor("#0891b2"), 1.5, Qt.PenStyle.DashLine)
+            pen.setCosmetic(True)
+            poly = sc.addPolygon(QPolygonF([QPointF(x, y) for x, y in self.heat.boundary]), pen)
+            poly.setZValue(-40)
+            self._boundary_item = poly
 
     def _sync_status(self) -> None:
         parts = [self.project.name + (" •" if self.dirty else ""),
@@ -784,4 +1062,6 @@ class SurveyTab(QWidget):
                          if self.walk.started else "Walk: click your start point")
         elif self.view.tool == "calibrate":
             parts.append("Calibrate: click two points a known distance apart")
+        elif self.view.tool == "boundary":
+            parts.append("Boundary: click the corners; double-click or Enter to finish, Esc cancels")
         self.status.setText("   |   ".join(parts))

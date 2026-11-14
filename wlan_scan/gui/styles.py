@@ -216,6 +216,17 @@ QCheckBox::indicator:checked {
 QCheckBox::indicator:hover {
     border-color: #3b82f6;
 }
+QListWidget::indicator {
+    width: 14px;
+    height: 14px;
+    border-radius: 3px;
+    border: 2px solid #505060;
+    background-color: transparent;
+}
+QListWidget::indicator:checked {
+    background-color: #3b82f6;
+    border-color: #3b82f6;
+}
 
 /* ── Band tabs ── */
 QTabWidget::pane {
