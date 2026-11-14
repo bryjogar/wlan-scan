@@ -24,12 +24,13 @@ from ..survey import geometry as G
 from ..survey import plan_import as PI
 from ..survey import project as P
 from ..survey.capture import PointCapture, WalkSession
+from ..survey import aps as A
 from ..survey import heatmap as H
 from ..survey.metrics import METRICS, Filter, point_metric
 from .background import run_in_background
 from .heatmap_widgets import LegendWidget, grid_pixmap
 from .plan_view import PlanView
-from .survey_dialogs import CalibrateDialog, import_plan
+from .survey_dialogs import APDialog, CalibrateDialog, import_plan
 
 log = get_logger("survey")
 
@@ -37,7 +38,7 @@ POINT_RADIUS = 9.0   # screen pixels (points ignore the view's zoom)
 AUTOSAVE_MS = 60_000
 BANDS = ("All bands", "2.4 GHz", "5 GHz", "6 GHz")
 DEFAULT_HEATMAP = {"show": True, "metric": "best_rssi", "ssids": [], "band": "",
-                   "bssid": "", "opacity": 60, "labels": False}
+                   "bssid": "", "opacity": 60, "labels": False, "show_aps": True}
 FILE_FILTER = f"WLAN surveys (*{P.SUFFIX});;All files (*)"
 
 
@@ -83,6 +84,65 @@ class PointItem(QGraphicsItem):
             p.drawText(QRectF(-40, r + 1, 80, 14), Qt.AlignmentFlag.AlignHCenter, self.label)
 
 
+class APItem(QGraphicsItem):
+    """AP marker: drag it (Pan tool) to where the AP really is."""
+
+    SIZE = 22.0
+
+    def __init__(self, marker, on_moved: Callable[[str, float, float], None]):
+        super().__init__()
+        self.setData(0, marker.id)
+        self.setPos(marker.x, marker.y)
+        self.setFlags(QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations
+                      | QGraphicsItem.GraphicsItemFlag.ItemIsMovable)
+        self.setCursor(Qt.CursorShape.SizeAllCursor)
+        self.setZValue(30)
+        self.label = marker.label
+        self.manual = marker.manual
+        self._on_moved = on_moved
+        self._press = None
+
+    def boundingRect(self) -> QRectF:
+        h = self.SIZE / 2
+        return QRectF(-90, -h - 2, 180, self.SIZE + 22)
+
+    def paint(self, p: QPainter, _opt, _w=None) -> None:
+        h = self.SIZE / 2
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        pen = QPen(QColor("#f8fafc"), 2, Qt.PenStyle.SolidLine if self.manual
+                   else Qt.PenStyle.DashLine)
+        p.setPen(pen)
+        p.setBrush(QBrush(QColor("#1d4ed8" if self.manual else "#475569")))
+        p.drawRoundedRect(QRectF(-h, -h, self.SIZE, self.SIZE), 5, 5)
+        p.setPen(QColor("#f8fafc"))
+        f = p.font()
+        f.setBold(True)
+        f.setPointSizeF(7.5)
+        p.setFont(f)
+        p.drawText(QRectF(-h, -h, self.SIZE, self.SIZE), Qt.AlignmentFlag.AlignCenter, "AP")
+        f.setBold(False)
+        f.setPointSizeF(8)
+        p.setFont(f)
+        tw = min(176, p.fontMetrics().horizontalAdvance(self.label) + 8)
+        box = QRectF(-tw / 2, h + 3, tw, 15)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(15, 23, 42, 200))
+        p.drawRoundedRect(box, 3, 3)
+        p.setPen(QColor("#f8fafc"))
+        p.drawText(box, Qt.AlignmentFlag.AlignCenter,
+                   p.fontMetrics().elidedText(self.label, Qt.TextElideMode.ElideRight, int(tw - 4)))
+
+    def mousePressEvent(self, event):
+        self._press = QPointF(self.pos())
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        super().mouseReleaseEvent(event)
+        if self._press is not None and self.pos() != self._press:
+            self._on_moved(self.data(0), self.pos().x(), self.pos().y())
+        self._press = None
+
+
 class SurveyTab(QWidget):
     scan_needed = Signal()         # one more scan please (point mode)
     continuous_needed = Signal()   # keep scanning (walk mode)
@@ -102,6 +162,7 @@ class SurveyTab(QWidget):
         self._overlay: list = []
         self._recovery_checked = False
         self._heat_item = None
+        self._ap_items: dict[str, APItem] = {}
         self._boundary_item = None
         self.heat: Optional[H.FloorHeatmap] = None
         # Hooks so tests can answer dialogs.
@@ -109,6 +170,8 @@ class SurveyTab(QWidget):
         self.ask_save: Callable[[], Optional[bool]] = self._ask_save
         self.calibrate_prompt: Callable[[float, str], Optional[tuple[float, str]]] = \
             self._calibrate_prompt
+        self.ap_prompt: Callable[[list, str, set], Optional[tuple[str, list[str]]]] = \
+            self._ap_prompt
         self.ping_runner: Optional[Callable[[str, int], dict]] = None
 
         self._build_ui()
@@ -228,6 +291,7 @@ class SurveyTab(QWidget):
         self.view.walk_cancelled.connect(lambda: self.set_tool("pan"))
         self.view.calibration_line.connect(self._on_calibration_line)
         self.view.boundary_drawn.connect(self.set_boundary)
+        self.view.ap_place_clicked.connect(self.on_ap_place)
         self.view.item_menu.connect(self._on_item_menu)
         split = QSplitter(Qt.Orientation.Horizontal)
         split.addWidget(self.view)
@@ -321,6 +385,25 @@ class SurveyTab(QWidget):
         bl.addLayout(row)
         v.addWidget(bbox)
 
+        abox = QGroupBox("Access points")
+        al = QVBoxLayout(abox)
+        self.show_aps_cb = QCheckBox("Show APs")
+        self.show_aps_cb.setToolTip("Estimated from where each AP was heard strongest "
+                                    "(dashed grey). Drag a marker with the Pan tool to its real "
+                                    "spot (it turns blue and stays put).")
+        self.show_aps_cb.toggled.connect(lambda on: self._set_heat("show_aps", bool(on)))
+        al.addWidget(self.show_aps_cb)
+        self.aps_lbl = QLabel("")
+        self.aps_lbl.setWordWrap(True)
+        al.addWidget(self.aps_lbl)
+        arow = QHBoxLayout()
+        arow.addWidget(self._btn("Place AP…", "Click on the plan where an AP is, then name it "
+                                 "and pick its BSSIDs", lambda: self.set_tool("place_ap")))
+        arow.addWidget(self._btn("Forget deleted", "Estimate APs you deleted again",
+                                 self._unignore_aps))
+        al.addLayout(arow)
+        v.addWidget(abox)
+
         self.legend = LegendWidget()
         v.addWidget(self.legend)
         v.addStretch()
@@ -342,6 +425,10 @@ class SurveyTab(QWidget):
         if r == QMessageBox.StandardButton.Discard:
             return False
         return None
+
+    def _ap_prompt(self, choices: list, label: str, selected: set):
+        dlg = APDialog(choices, label, selected, self)
+        return dlg.values() if dlg.exec() else None
 
     def _calibrate_prompt(self, px: float, unit: str):
         dlg = CalibrateDialog(px, unit, self)
@@ -586,7 +673,7 @@ class SurveyTab(QWidget):
     def set_tool(self, tool: str) -> None:
         if tool != "walk":
             self._stop_walk()
-        if tool in ("point", "walk", "boundary", "calibrate") and self.floor is None:
+        if tool in ("point", "walk", "boundary", "calibrate", "place_ap") and self.floor is None:
             self._flash("Import a floor plan first (+ Floor plan…)")
             tool = "pan"
         self.view.set_tool(tool)
@@ -774,6 +861,9 @@ class SurveyTab(QWidget):
         self._sync_status()
 
     def _on_item_menu(self, tag: str, global_pos) -> None:
+        if tag.startswith("ap-"):
+            self._ap_menu(tag, global_pos)
+            return
         if not tag.startswith("pt-") or self.project.point(tag) is None:
             return
         m = QMenu(self)
@@ -943,6 +1033,9 @@ class SurveyTab(QWidget):
         for w in widgets:
             w.blockSignals(False)
         self.bssid_combo.setEnabled(hs["metric"] == "bssid_rssi")
+        self.show_aps_cb.blockSignals(True)
+        self.show_aps_cb.setChecked(bool(hs["show_aps"]))
+        self.show_aps_cb.blockSignals(False)
         self._sync_filter_lists(force=True)
 
     def _floor_readings(self):
@@ -988,6 +1081,110 @@ class SurveyTab(QWidget):
             self.bssid_combo.setCurrentIndex(i)
             self.bssid_combo.blockSignals(False)
 
+    # ------------------------------------------------------------------ APs
+
+    def _sync_aps(self) -> None:
+        """Re-estimate automatic markers and redraw all of them."""
+        sc = self.view.scene()
+        for it in self._ap_items.values():
+            sc.removeItem(it)
+        self._ap_items = {}
+        f = self.floor
+        if f is None:
+            self.aps_lbl.setText("")
+            return
+        A.refresh_estimates(self.project, f)
+        n_man = sum(1 for m in f.ap_markers if m.manual)
+        self.aps_lbl.setText(f"{len(f.ap_markers) - n_man} estimated, {n_man} placed"
+                             + (f", {len(f.ignored_bssids)} BSSID(s) ignored"
+                                if f.ignored_bssids else ""))
+        if not self.heat_settings().get("show_aps", True):
+            return
+        for m in f.ap_markers:
+            it = APItem(m, self._on_ap_moved)
+            how = "placed by hand" if m.manual else \
+                f"estimated from its {A.TOP_K} strongest points"
+            it.setToolTip(f"{m.label}\n{how}\n" + "\n".join(m.bssids))
+            sc.addItem(it)
+            self._ap_items[m.id] = it
+
+    def _ap_choices(self) -> list[tuple[str, str, Optional[float]]]:
+        means, ssids = A.bssid_stats(self.project, self.floor_id)
+        rows = []
+        for b, pts in means.items():
+            ssid = ssids[b].most_common(1)[0][0] if ssids.get(b) else ""
+            rows.append((b, ssid, max(pts.values()) if pts else None))
+        return sorted(rows, key=lambda r: (-(r[2] if r[2] is not None else -999), r[0]))
+
+    def on_ap_place(self, x: float, y: float):
+        f = self.floor
+        if f is None:
+            return None
+        ans = self.ap_prompt(self._ap_choices(), f"AP {len(f.ap_markers) + 1}", set())
+        self.set_tool("pan")
+        if not ans:
+            return None
+        m = A.add_manual(f, x, y, *ans)
+        self.mark_dirty()
+        self._sync_aps()
+        return m
+
+    def _on_ap_moved(self, ap_id: str, x: float, y: float) -> None:
+        f = self.floor
+        if f is not None and A.move(f, ap_id, x, y):
+            self.mark_dirty()
+
+    def _marker(self, ap_id: str):
+        f = self.floor
+        return next((m for m in f.ap_markers if m.id == ap_id), None) if f else None
+
+    def _ap_menu(self, ap_id: str, global_pos) -> None:
+        m = self._marker(ap_id)
+        if m is None:
+            return
+        menu = QMenu(self)
+        menu.addAction("Rename / BSSIDs…", lambda: self.edit_ap(ap_id))
+        if m.manual:
+            menu.addAction("Back to estimated position", lambda: self.reset_ap(ap_id))
+        menu.addAction("Delete", lambda: self.delete_ap(ap_id))
+        menu.exec(global_pos)
+
+    def edit_ap(self, ap_id: str) -> None:
+        m = self._marker(ap_id)
+        if m is None:
+            return
+        ans = self.ap_prompt(self._ap_choices(), m.label, set(m.bssids))
+        if not ans:
+            return
+        f = self.floor
+        label, bssids = ans
+        f.ap_markers = [a for a in f.ap_markers if a.id != ap_id]
+        new = A.add_manual(f, m.x, m.y, label or m.label, bssids or m.bssids)
+        new.id = ap_id
+        self.mark_dirty()
+        self._sync_aps()
+
+    def reset_ap(self, ap_id: str) -> None:
+        f = self.floor
+        if f is not None:
+            A.reset(f, ap_id)
+            self.mark_dirty()
+            self._sync_aps()
+
+    def delete_ap(self, ap_id: str) -> None:
+        f = self.floor
+        if f is not None:
+            A.remove(f, ap_id)
+            self.mark_dirty()
+            self._sync_aps()
+
+    def _unignore_aps(self) -> None:
+        f = self.floor
+        if f is not None and f.ignored_bssids:
+            f.ignored_bssids = []
+            self.mark_dirty()
+            self._sync_aps()
+
     def _refresh_point_items(self) -> None:
         for pid in self._items:
             self._update_item(pid)
@@ -1016,6 +1213,7 @@ class SurveyTab(QWidget):
             self.heat = None
             self.legend.set_ramp(None, "")
             self.boundary_lbl.setText("")
+            self._sync_aps()
             return
         self._sync_filter_lists()
         hs = self.heat_settings()
@@ -1027,6 +1225,7 @@ class SurveyTab(QWidget):
             ("Auto: points' outline + margin" if self.heat.auto_boundary else
              f"Drawn ({len(f.boundary)} corners)")
             + f". {n} point(s) with data for this metric.")
+        self._sync_aps()
         if not hs["show"]:
             return
         if self.heat.grid is not None:
@@ -1062,6 +1261,8 @@ class SurveyTab(QWidget):
                          if self.walk.started else "Walk: click your start point")
         elif self.view.tool == "calibrate":
             parts.append("Calibrate: click two points a known distance apart")
+        elif self.view.tool == "place_ap":
+            parts.append("Place AP: click where the access point is")
         elif self.view.tool == "boundary":
             parts.append("Boundary: click the corners; double-click or Enter to finish, Esc cancels")
         self.status.setText("   |   ".join(parts))

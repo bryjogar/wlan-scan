@@ -92,3 +92,42 @@ class CalibrateDialog(QDialog):
 
     def values(self) -> tuple[float, str]:
         return self.distance.value(), self.unit.currentText()
+
+
+class APDialog(QDialog):
+    """Name an AP marker and pick the BSSIDs it serves."""
+
+    def __init__(self, choices: list[tuple[str, str, Optional[float]]], label: str = "",
+                 selected: Optional[set[str]] = None, parent: Optional[QWidget] = None):
+        """``choices``: (bssid, ssid, best RSSI or None)."""
+        super().__init__(parent)
+        from PySide6.QtWidgets import QLineEdit
+        self.setWindowTitle("Access point")
+        form = QFormLayout(self)
+        self.label = QLineEdit(label)
+        self.label.setPlaceholderText("e.g. AP-2F-East")
+        form.addRow("Name:", self.label)
+        self.list = QListWidget()
+        selected = {b.upper() for b in (selected or set())}
+        for bssid, ssid, rssi in choices:
+            text = f"{ssid or '(hidden)'} — {bssid}" + (f"  ({rssi:.0f} dBm)" if rssi is not None
+                                                         else "")
+            it = QListWidgetItem(text)
+            it.setData(Qt.ItemDataRole.UserRole, bssid)
+            it.setFlags(it.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            it.setCheckState(Qt.CheckState.Checked if bssid.upper() in selected
+                             else Qt.CheckState.Unchecked)
+            self.list.addItem(it)
+        form.addRow("BSSIDs:", self.list)
+        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok
+                              | QDialogButtonBox.StandardButton.Cancel)
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        form.addRow(bb)
+        self.resize(460, 420)
+
+    def values(self) -> tuple[str, list[str]]:
+        ticked = [self.list.item(i).data(Qt.ItemDataRole.UserRole)
+                  for i in range(self.list.count())
+                  if self.list.item(i).checkState() == Qt.CheckState.Checked]
+        return self.label.text().strip(), ticked

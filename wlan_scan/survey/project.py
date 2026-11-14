@@ -3,7 +3,8 @@
 A ``.wlansurvey`` file is a zip:
 
     project.json     schema, name, site, created/modified, settings,
-                     floors (id, name, image file, scale, boundary, AP markers),
+                     floors (id, name, image file, scale, boundary, AP markers,
+                     ignored BSSIDs),
                      points (id, floor, x/y in image pixels, mode, time, ping)
     samples.jsonl    one line per scan taken at a point:
                      {"point", "t", "connected", "bss": [{...}, ...]}
@@ -104,6 +105,7 @@ class Floor:
     scale: Optional[Scale] = None
     boundary: Optional[list[tuple[float, float]]] = None  # None = auto (convex hull + margin)
     ap_markers: list[APMarker] = field(default_factory=list)
+    ignored_bssids: list[str] = field(default_factory=list)  # deleted AP estimates
 
     def to_dict(self) -> dict:
         return {
@@ -112,6 +114,7 @@ class Floor:
             "scale": self.scale.to_dict() if self.scale else None,
             "boundary": [list(p) for p in self.boundary] if self.boundary else None,
             "aps": [a.to_dict() for a in self.ap_markers],
+            "ignored_bssids": list(self.ignored_bssids),
         }
 
     @classmethod
@@ -122,6 +125,7 @@ class Floor:
             scale=Scale.from_dict(d["scale"]) if d.get("scale") else None,
             boundary=[tuple(p) for p in d["boundary"]] if d.get("boundary") else None,
             ap_markers=[APMarker.from_dict(a) for a in d.get("aps", [])],
+            ignored_bssids=list(d.get("ignored_bssids", [])),
         )
 
 
