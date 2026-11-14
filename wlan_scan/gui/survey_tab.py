@@ -244,6 +244,15 @@ class SurveyTab(QWidget):
         self.unit_combo.currentTextChanged.connect(self._on_unit)
         row1.addWidget(self.unit_combo)
         row1.addWidget(self._btn("Fit", "Fit the plan in the view", lambda: self.view.fit()))
+        exp_btn = QToolButton()
+        exp_btn.setText("Export ▾")
+        exp_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        em = QMenu(exp_btn)
+        em.addAction("Heatmap image (PNG)…", lambda: self.export_png())
+        em.addAction("Samples (CSV)…", lambda: self.export_csv())
+        em.addAction("Report, all floors and metrics (PDF)…", lambda: self.export_pdf())
+        exp_btn.setMenu(em)
+        row1.addWidget(exp_btn)
         row1.addStretch()
         lay.addLayout(row1)
 
@@ -1080,6 +1089,71 @@ class SurveyTab(QWidget):
                 hs["bssid"] = want_b[0]
             self.bssid_combo.setCurrentIndex(i)
             self.bssid_combo.blockSignals(False)
+
+    # --------------------------------------------------------------- export
+
+    def _export_path(self, title: str, suffix: str, filt: str, extra: str = "") -> Optional[Path]:
+        base = (self.path.with_suffix("") if self.path else Path.home() / self.project.name)
+        start = f"{base}{extra}{suffix}"
+        path, _ = QFileDialog.getSaveFileName(self, title, start, filt)
+        if not path:
+            return None
+        path = Path(path)
+        return path if path.suffix.lower() == suffix else path.with_name(path.name + suffix)
+
+    def render_options(self):
+        from .survey_export import RenderOptions
+        hs = self.heat_settings()
+        return RenderOptions(opacity=hs["opacity"] / 100.0, labels=bool(hs["labels"]),
+                             aps=bool(hs["show_aps"]))
+
+    def export_png(self, path: Optional[str] = None) -> Optional[Path]:
+        from .survey_export import export_png
+        f = self.floor
+        if f is None:
+            QMessageBox.information(self, "Export", "Import a floor plan first.")
+            return None
+        path = Path(path) if path else self._export_path(
+            "Export heatmap image", ".png", "PNG image (*.png)",
+            f" - {f.name} - {self.heat_settings()['metric']}")
+        if path is None:
+            return None
+        try:
+            export_png(path, self.project, f, self.heat_spec(), self.render_options())
+        except OSError as e:
+            QMessageBox.critical(self, "Export", str(e))
+            return None
+        self._flash(f"Saved {path}")
+        return path
+
+    def export_csv(self, path: Optional[str] = None) -> Optional[Path]:
+        from ..survey import survey_csv
+        path = Path(path) if path else self._export_path(
+            "Export survey samples", ".csv", "CSV (*.csv)", " - samples")
+        if path is None:
+            return None
+        try:
+            n = survey_csv.write(self.project, path)
+        except OSError as e:
+            QMessageBox.critical(self, "Export", str(e))
+            return None
+        self._flash(f"Saved {n} rows (point × BSSID) to {path}")
+        return path
+
+    def export_pdf(self, path: Optional[str] = None) -> Optional[Path]:
+        from .survey_export import export_pdf
+        path = Path(path) if path else self._export_path(
+            "Export survey report", ".pdf", "PDF (*.pdf)", " - report")
+        if path is None:
+            return None
+        try:
+            n = export_pdf(path, self.project, self.heat_spec(),
+                           opts=self.render_options())
+        except OSError as e:
+            QMessageBox.critical(self, "Export", str(e))
+            return None
+        self._flash(f"Saved a {n}-page report to {path}")
+        return path
 
     # ------------------------------------------------------------------ APs
 

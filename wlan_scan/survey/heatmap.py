@@ -167,3 +167,12 @@ def floor_heatmap(project, floor, spec: HeatmapSpec) -> FloorHeatmap:
         grid = idw_grid(xy, list(vals.values()), w, h,
                         float(s.get("idw_power", 2.0)), boundary or None)
     return FloorHeatmap(grid, ramp, boundary, vals, auto)
+
+
+def area_at_least(grid: Grid, thresholds: Sequence[float]) -> list[tuple[float, float]]:
+    """Fraction of the surveyed area (cells inside the boundary) whose value
+    is ≥ each threshold."""
+    v = grid.values[~np.isnan(grid.values)]
+    if v.size == 0:
+        return [(t, 0.0) for t in thresholds]
+    return [(t, float((v >= t).mean())) for t in thresholds]

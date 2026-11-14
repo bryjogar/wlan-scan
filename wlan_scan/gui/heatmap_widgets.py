@@ -5,7 +5,8 @@ from __future__ import annotations
 from typing import Optional
 
 from PySide6.QtCore import QRectF, Qt
-from PySide6.QtGui import QColor, QFont, QImage, QLinearGradient, QPainter, QPen, QPixmap
+from PySide6.QtGui import (QBrush, QColor, QFont, QImage, QLinearGradient, QPainter, QPen,
+                           QPixmap)
 from PySide6.QtWidgets import QSizePolicy, QWidget
 
 from ..survey.heatmap import Grid, to_rgba
@@ -47,8 +48,9 @@ def paint_legend(p: QPainter, rect: QRectF, ramp: ColorRamp, title: str,
     span = (ramp.hi - ramp.lo) or 1
     for v, c in ramp.stops:
         g.setColorAt((v - ramp.lo) / span, QColor(c))
-    p.fillRect(bar, g)
+    p.fillRect(bar, QBrush(g))
     p.setPen(QPen(fg, 1))
+    p.setBrush(Qt.BrushStyle.NoBrush)   # outline only (callers may leave a brush set)
     p.drawRect(bar)
     # Labels that would overlap the previous one on a line drop to the next line.
     fm = p.fontMetrics()
