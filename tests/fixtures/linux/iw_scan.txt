@@ -1,0 +1,104 @@
+# SYNTHETIC: hand-written in the format of `iw dev wlan0 scan` (iw 6.x). Not a capture.
+BSS 3c:84:6a:10:20:08(on wlan0) -- associated
+	last seen: 3519.392s [boottime]
+	TSF: 4211542931 usec (0d, 01:10:11)
+	freq: 5180.0
+	beacon interval: 100 TUs
+	capability: ESS Privacy SpectrumMgmt RadioMeasure (0x1111)
+	signal: -52.00 dBm
+	last seen: 120 ms ago
+	Information elements from Probe Response frame:
+	SSID: Corp
+	Supported rates: 6.0* 9.0 12.0* 18.0 24.0* 36.0 48.0 54.0 
+	DS Parameter set: channel 36
+	BSS Load:
+		 * station count: 7
+		 * channel utilisation: 51/255
+		 * available admission capacity: 0 [*32us]
+	HT capabilities:
+		Capabilities: 0x9ef
+	HT operation:
+		 * primary channel: 36
+		 * secondary channel offset: above
+		 * STA channel width: any
+	VHT capabilities:
+		VHT Capabilities (0x339b79fa):
+	VHT operation:
+		 * channel width: 1 (80 MHz)
+		 * center freq segment 1: 42
+		 * center freq segment 2: 0
+		 * VHT basic MCS set: 0xfffc
+	RSN:	 * Version: 1
+		 * Group cipher: CCMP
+		 * Pairwise ciphers: CCMP
+		 * Authentication suites: PSK SAE FT/SAE
+		 * Capabilities: 1-PTKSA-RC 1-GTKSA-RC MFP-capable (0x0080)
+	HE capabilities:
+		HE MAC Capabilities (0x000801185018):
+BSS f0:9f:c2:77:00:10(on wlan0)
+	freq: 2412
+	capability: ESS Privacy ShortSlotTime (0x0411)
+	signal: -71.00 dBm
+	SSID: Cafe
+	HT operation:
+		 * primary channel: 1
+		 * secondary channel offset: above
+		 * STA channel width: any
+	RSN:	 * Version: 1
+		 * Group cipher: TKIP
+		 * Pairwise ciphers: CCMP TKIP
+		 * Authentication suites: PSK
+		 * Capabilities: 16-PTKSA-RC 1-GTKSA-RC (0x000c)
+	WPA:	 * Version: 1
+		 * Group cipher: TKIP
+		 * Pairwise ciphers: TKIP
+		 * Authentication suites: PSK
+BSS 3c:84:6a:10:40:10(on wlan0)
+	freq: 6115
+	capability: ESS Privacy (0x0011)
+	signal: -60.00 dBm
+	SSID: Corp6
+	RSN:	 * Version: 1
+		 * Group cipher: CCMP
+		 * Pairwise ciphers: CCMP GCMP-256
+		 * Authentication suites: SAE SAE-EXT-KEY
+		 * Capabilities: 1-PTKSA-RC 1-GTKSA-RC MFP-required MFP-capable (0x00c0)
+	HE capabilities:
+		HE MAC Capabilities (0x000801185018):
+	EHT capabilities:
+		EHT MAC Capabilities (0x0000):
+	EHT Operation
+			BSS operating channel width: 160 MHz
+BSS 3c:84:6a:10:40:20(on wlan0)
+	freq: 5955
+	capability: ESS Privacy (0x0011)
+	signal: -77.00 dBm
+	SSID: Corp6b
+	RSN:	 * Version: 1
+		 * Group cipher: CCMP
+		 * Pairwise ciphers: CCMP
+		 * Authentication suites: SAE
+		 * Capabilities: MFP-required MFP-capable (0x00c0)
+	HE capabilities:
+BSS b6:fb:e4:01:02:03(on wlan0)
+	freq: 5745
+	capability: ESS Privacy (0x0011)
+	signal: -83.00 dBm
+	SSID: \x00\x00\x00\x00
+	RSN:	 * Version: 1
+		 * Group cipher: CCMP
+		 * Pairwise ciphers: CCMP
+		 * Authentication suites: IEEE 802.1X/SHA-256
+		 * Capabilities: MFP-required MFP-capable (0x00c0)
+BSS 00:11:22:33:44:55(on wlan0)
+	freq: 2437
+	capability: ESS (0x0401)
+	signal: -64.00 dBm
+	SSID: Caf\xc3\xa9 Guest
+	OWE Transition Mode:
+		BSSID: 00:11:22:33:44:56
+BSS 00:0c:41:aa:bb:cc(on wlan0)
+	freq: 2462
+	capability: ESS Privacy (0x0011)
+	signal: -88.00 dBm
+	SSID: oldlinksys

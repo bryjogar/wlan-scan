@@ -18,6 +18,9 @@ def connected_bssid() -> Optional[str]:
         return _windows_connected_bssid()
     if sys.platform == "darwin":
         return _macos_connected_bssid()
+    if sys.platform.startswith("linux"):
+        from .linux_scanner import linux_connected_bssid
+        return linux_connected_bssid()
     return None
 
 

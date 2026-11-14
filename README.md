@@ -46,11 +46,11 @@ Professional Wi-Fi network analysis and diagnostics tool. Built with Python and 
 
 ## Requirements
 
-- Windows 10 or 11 (x64 or ARM64), or macOS 12+ (Intel or Apple Silicon)
+- Windows 10 or 11 (x64 or ARM64), macOS 12+ (Intel or Apple Silicon), or Linux
 - Python 3.10+, PySide6 and numpy (`requirements.txt`)
 - A Wi-Fi adapter (built-in or USB)
 - macOS 14+: allow Location Services for WLAN Scan (macOS hides SSIDs/BSSIDs otherwise; the app asks and explains)
-- Linux: no live scanning yet; `--replay` plays back a recording, and the Survey tab works for opening and exporting surveys
+- Linux: `iw` and/or NetworkManager (`nmcli`). Run as root (or with `CAP_NET_ADMIN`) and `iw` triggers scans itself; otherwise NetworkManager is asked to rescan and `iw` reads the results, still with real dBm. With `nmcli` alone RSSI is converted from NetworkManager's signal percent and shown as an estimate (≈), and channel width isn't available. Run from source (`python main.py`); there is no packaged Linux build.
 - Ookla Speedtest CLI (optional, for speedtest feature — download from [speedtest.net/apps/cli](https://www.speedtest.net/apps/cli))
 
 ## Quick Start
@@ -141,7 +141,7 @@ Uses Windows' native `wlanapi.dll` via ctypes to:
 6. **Detect adapter capabilities** via `WlanGetInterfaceCapability()` — reports supported PHY types, maps them to bands and Wi-Fi generations
 
 ### ARM64 Fallback (`pwsh_scanner.py`)
-Windows on ARM has a known ctypes/libffi issue with wlanapi.dll. A PowerShell-based scanner bridges this gap using the same underlying Windows APIs via .NET P/Invoke, and its results go through the same IE parser. `backends.py` picks a scanner per platform and falls back down the list (wlanapi → PowerShell → netsh on Windows; CoreWLAN → airport on macOS); the status bar shows which one is active.
+Windows on ARM has a known ctypes/libffi issue with wlanapi.dll. A PowerShell-based scanner bridges this gap using the same underlying Windows APIs via .NET P/Invoke, and its results go through the same IE parser. `backends.py` picks a scanner per platform and falls back down the list (wlanapi → PowerShell → netsh on Windows; CoreWLAN → airport on macOS; iw → nmcli on Linux); the status bar shows which one is active.
 
 ### Diagnostic Tools
 - **Ping** — Uses `ping -t` on Windows with background threading and regex parsing for multilingual output
@@ -166,6 +166,7 @@ wlan-scan/
 │   ├── netsh_scanner.py       # netsh fallback (values are estimates)
 │   ├── corewlan_scanner.py    # macOS CoreWLAN scanner
 │   ├── airport_scanner.py     # macOS airport CLI fallback (macOS < 14.4)
+│   ├── linux_scanner.py       # Linux: iw scan parser, nmcli parser
 │   ├── recording.py           # Record scans to JSON lines; replay backend
 │   ├── bss.py                 # Raw BSS fields → BSSEntry (shared by all Windows paths)
 │   ├── ie_parser.py           # 802.11 Information Element parser
@@ -227,6 +228,7 @@ WlanScan() → WlanGetNetworkBssList()
 
 ### Completed
 - [x] **macOS support** — Native scanner via CoreWLAN and `airport` CLI, platform-appropriate subnet detection, unified cross-platform backend interface
+- [x] **Linux support** — `iw` (dBm, IE details) with NetworkManager fallback
 - [x] **Signal heatmap overlay** — Floor plan import, point/walk survey, heatmaps, AP placement, PNG/CSV/PDF export
 
 ### Next
@@ -238,7 +240,6 @@ WlanScan() → WlanGetNetworkBssList()
 - [ ] Remote sensor support (Raspberry Pi / secondary adapters)
 - [ ] Channel utilization trending over time
 - [ ] Alerting (new network detection, signal drops below threshold, rogue AP detection)
-- [ ] Linux support (nl80211 / iw)
 
 ## License
 

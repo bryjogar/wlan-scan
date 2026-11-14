@@ -9,6 +9,7 @@ Order per platform:
     Windows x64    wlanapi (ctypes) -> PowerShell bridge -> netsh
     Windows ARM64  PowerShell bridge -> netsh   (ctypes struct passing is broken)
     macOS          CoreWLAN -> airport CLI (only before macOS 14.4)
+    Linux          iw (dBm; trigger needs root, else nmcli rescan + iw dump) -> nmcli
     other          none — use --replay
     --replay FILE  replay only
 """
@@ -19,7 +20,7 @@ import platform as _platform
 import sys
 from typing import Callable, Optional, Protocol, runtime_checkable
 
-from .models import ScanResult
+from .models import ScanResult, group_networks
 
 DebugFn = Callable[[str], None]
 
@@ -227,6 +228,103 @@ class AirportBackend(BaseBackend):
 
 
 # ---------------------------------------------------------------------------
+# Linux
+# ---------------------------------------------------------------------------
+
+
+class IwBackend(BaseBackend):
+    """``iw``: real dBm and decoded IEs. Triggering a scan needs root or
+    CAP_NET_ADMIN; without it, NetworkManager is asked to rescan and the
+    kernel's results are read with ``iw … scan dump`` (no privileges)."""
+
+    name = "iw"
+
+    def __init__(self, debug=None, run=None):
+        super().__init__(debug)
+        self._runner = run
+        self.ifname = ""
+        self.can_trigger = True
+
+    def _cmd(self, cmd, timeout=30.0):
+        from .linux_scanner import _run
+        return _run(cmd, timeout, self._runner)
+
+    def open(self) -> None:
+        from . import linux_scanner as L
+
+        if self._runner is None and (not sys.platform.startswith("linux") or not L.which("iw")):
+            raise BackendUnavailable("iw not found")
+        ifaces = L.wireless_interfaces(self._runner)
+        if not ifaces:
+            raise BackendUnavailable("no wireless interface")
+        self.ifname = ifaces[0]
+        cp = self._cmd(["iw", "dev", self.ifname, "scan", "dump"], 15)
+        if cp.returncode != 0:
+            raise BackendUnavailable(f"iw scan dump failed: {(cp.stderr or '').strip()}")
+        self.dbg(f"iw on {self.ifname}")
+
+    def scan(self) -> ScanResult:
+        from . import linux_scanner as L
+
+        text = None
+        if self.can_trigger:
+            cp = self._cmd(["iw", "dev", self.ifname, "scan"], 30)
+            if cp.returncode == 0:
+                text = cp.stdout
+            elif L.is_permission_error(cp):
+                self.can_trigger = False
+                self.dbg("iw can't trigger scans without root/CAP_NET_ADMIN: "
+                         "asking NetworkManager to rescan, reading results with iw scan dump")
+            else:
+                self.dbg(f"iw scan: {(cp.stderr or '').strip()} — reading cached results")
+        if text is None:
+            if self._runner is not None or L.which("nmcli"):
+                # Blocks until NetworkManager's rescan finishes; output unused.
+                self._cmd(["nmcli", "-t", "-f", "BSSID", "dev", "wifi", "list",
+                           "--rescan", "yes", "ifname", self.ifname], 40)
+            cp = self._cmd(["iw", "dev", self.ifname, "scan", "dump"], 15)
+            if cp.returncode != 0:
+                raise RuntimeError(f"iw scan dump failed: {(cp.stderr or '').strip()}")
+            text = cp.stdout
+        entries, connected = L.parse_iw_scan(text or "")
+        return ScanResult(networks=group_networks(entries), interface_name=self.ifname,
+                          connected_bssid=connected)
+
+
+class NmcliBackend(BaseBackend):
+    """NetworkManager's ``nmcli``: no privileges, but signal is a percent
+    (RSSI estimated) and width isn't reported."""
+
+    name = "nmcli"
+    estimated = True
+
+    def __init__(self, debug=None, run=None):
+        super().__init__(debug)
+        self._runner = run
+        self.ifname = ""
+
+    def open(self) -> None:
+        from . import linux_scanner as L
+
+        if self._runner is None and (not sys.platform.startswith("linux")
+                                     or not L.which("nmcli")):
+            raise BackendUnavailable("nmcli not found")
+        cp = L._run(["nmcli", "-t", "-f", "DEVICE,TYPE", "device"], 10, self._runner)
+        if cp.returncode != 0:
+            raise BackendUnavailable(f"nmcli failed: {(cp.stderr or '').strip()}")
+        wifi = [L.split_terse(x)[0] for x in (cp.stdout or "").splitlines()
+                if len(L.split_terse(x)) > 1 and L.split_terse(x)[1] == "wifi"]
+        if not wifi:
+            raise BackendUnavailable("NetworkManager has no Wi-Fi device")
+        self.ifname = wifi[0]
+
+    def scan(self) -> ScanResult:
+        from . import linux_scanner as L
+
+        return L.nmcli_scan(True, self._runner, self.ifname)
+
+
+# ---------------------------------------------------------------------------
 # Picker
 # ---------------------------------------------------------------------------
 
@@ -258,6 +356,8 @@ def candidate_backends(
         return [WlanApiBackend, PwshBackend, NetshBackend]
     if platform == "darwin":
         return [CoreWLANBackend, AirportBackend]
+    if platform.startswith("linux"):
+        return [IwBackend, NmcliBackend]
     return []
 
 

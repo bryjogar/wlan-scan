@@ -1,0 +1,9 @@
+# SYNTHETIC: hand-written in the format of `nmcli -t -e yes -f ACTIVE,BSSID,SSID,CHAN,FREQ,SIGNAL,SECURITY dev wifi list`. Not a capture.
+yes:3C\:84\:6A\:10\:20\:08:Corp:36:5180 MHz:80:WPA2 WPA3
+no:F0\:9F\:C2\:77\:00\:10:Cafe:1:2412 MHz:49:WPA1 WPA2
+no:3C\:84\:6A\:10\:40\:10:Corp6:33:6115 MHz:67:WPA3
+no:B6\:FB\:E4\:01\:02\:03::149:5745 MHz:28:WPA2 802.1X
+no:00\:11\:22\:33\:44\:55:Caf\:e\\ Guest:6:2437 MHz:60:OWE
+no:00\:0C\:41\:AA\:BB\:CC:oldlinksys:11:2462 MHz:20:WEP
+no:3C\:84\:6A\:10\:20\:08:Corp:36:5180 MHz:80:WPA2 WPA3
+no:A0\:36\:BC\:10\:00\:01:Lab:1:2412 MHz:100:--

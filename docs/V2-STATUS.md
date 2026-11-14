@@ -53,7 +53,7 @@ Legend: ✅ done · 🔧 in progress · ⛔ blocked · ⬜ not started
 
 | Item | State | Notes |
 |---|---|---|
-| L1 Linux backend | ⬜ | |
+| L1 Linux backend | ✅ | `wlan_scan/linux_scanner.py` + `IwBackend`/`NmcliBackend` in `backends.py`; Linux order is iw → nmcli. **iw**: `iw dev <if> scan` when allowed (root/CAP_NET_ADMIN); on "Operation not permitted" it switches (once, logged) to `nmcli … --rescan yes` (blocks until NetworkManager's scan ends) + `iw dev <if> scan dump`, which needs no privileges, so RSSI stays real dBm. iw's decoded text is mapped onto the IE parser's own security code (`_apply_security`/`classify_security`, AKM/cipher numbers from iw's suite names incl. `00-0f-ac:N`), so labels/PMF match Windows/macOS; width from HT/VHT operation (`_vht_style_width`) or EHT's "BSS operating channel width"; 6 GHz without operation info → 20 MHz marked estimated. BSS Load, Privacy bit (WEP), OWE transition, generation from HT/VHT/HE/EHT capabilities, `\xNN` SSID escapes, associated BSSID. **nmcli**: `-t -e yes -f ACTIVE,BSSID,SSID,CHAN,FREQ,SIGNAL,SECURITY dev wifi list --rescan yes` (falls back to `--rescan no` if refused); RSSI from NetworkManager's percent mapping (−100…−40 dBm), marked estimate with width. Connected BSSID on Linux: `iw dev <if> link`, else nmcli ACTIVE. README requirements updated. Tests use hand-written iw/nmcli output (`tests/fixtures/linux/`, synthetic; iw labels checked against iw 6.17's strings). This dev-server does have an adapter (`wlp2s0`) but it is down and unmanaged (no NetworkManager), so only `scan dump` (empty) and `link` could be run for real; `--cli` runs end to end on the iw backend with 0 networks. |
 
 ## Needs Bryan's hardware
 
@@ -77,6 +77,7 @@ Each needs a run on a real machine before release.
 | F4 | Windows + macOS | Survey ping runs `ping -n 5 -w 1000` (Windows) / `ping -c 5` (macOS) once per point; reply lines parsed for `time=`/`time<`. | Tick "Ping gateway at each point", take a point: the tooltip shows "Ping <gateway>: x ms, 0% loss". With Wi-Fi off it should show no replies, not hang. |
 | F5 | Windows + macOS builds | numpy is bundled now (was excluded). | Survey tab of a built app: with a few points the heatmap appears (no `ImportError: numpy` in the log). Note the build size change. |
 | F7 | Windows + macOS builds | PDF report via `QPdfWriter` (QtGui). | Export ▾ → Report (PDF) in the built app opens in a PDF viewer, one page per metric. |
+| L1 | Linux (Bryan's laptop) | New iw/nmcli backends. | `python main.py`: status bar says `Backend: iw` and networks list with plausible dBm (compare `nmcli dev wifi`); widths 40/80/160 on 5 GHz APs; Ctrl+D log says whether iw triggers or uses NetworkManager rescans. Without iw installed: `Backend: nmcli (RSSI/width estimated)` and ≈ values. Connected network gets its ● marker. |
 | F2 | Windows + macOS builds | Built apps must bundle QtPdf (pdfium). | Import a PDF floor plan in the built app (all three: onedir, onefile, .app). |
 | R1 | macOS | CoreWLAN + airport set `center_channel` (airport from `,+1`/`,-1`, CoreWLAN from the 5/6 GHz plan) and CoreWLAN fills `center_frequency`. | Same channel map check on a Mac. |
 

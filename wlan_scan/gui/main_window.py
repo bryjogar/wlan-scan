@@ -642,7 +642,8 @@ class MainWindow(QMainWindow):
         if not name:
             self._statusbar.showMessage(
                 "⚠  No Wi-Fi scanner is available on this system "
-                "(Windows and macOS are supported; use --replay FILE to play a recording).",
+                "(Windows, macOS and Linux with iw or NetworkManager are supported; "
+                "use --replay FILE to play a recording).",
                 0,
             )
 
